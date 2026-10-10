@@ -1,0 +1,19 @@
+# Banco SQLite local (criado na primeira execução)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Variáveis de ambiente com valores reais
+.env
+
+# Binários compilados
+/bin/
+/botao-panico
+/api
+
+# Editores e sistema operacional
+.DS_Store
+.idea/
+.vscode/
+*.swp
