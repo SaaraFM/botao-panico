@@ -49,6 +49,7 @@ func TestCarregar_Invalidos(t *testing.T) {
 		"timeout inválido": {"EXTERNAL_API_TIMEOUT": "rápido"},
 		"timeout negativo": {"EXTERNAL_API_TIMEOUT": "-1s"},
 		"timeout notif":    {"NOTIFICATION_TIMEOUT": "2h"},
+		"agente vazio":     {"EXTERNAL_API_USER_AGENT": ""},
 	}
 	for nome, vars := range casos {
 		t.Run(nome, func(t *testing.T) {

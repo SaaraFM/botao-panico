@@ -12,6 +12,12 @@
 /botao-panico
 /api
 
+# Relatórios de cobertura
+coverage.out
+coverage.html
+coverage
+/coverage/
+
 # Editores e sistema operacional
 .DS_Store
 .idea/
