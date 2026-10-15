@@ -20,6 +20,7 @@ func TestMemoria_DevolveCopias(t *testing.T) {
 	require.NoError(t, err)
 	lido.InstituicoesAlvo[0].Nome = "alterado"
 	lido.Status = alerta.StatusConcluido
+	assert.Equal(t, alerta.StatusConcluido, lido.Status)
 
 	denovo, err := m.BuscarAlerta(ctx, "a1")
 	require.NoError(t, err)

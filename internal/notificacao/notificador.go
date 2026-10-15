@@ -79,9 +79,11 @@ func (d *Despachante) Despachar(ctx context.Context, destinatarios []alerta.Dest
 	return resultados
 }
 
-// --- Implementações simuladas dos canais (substituíveis por Twilio, SES etc.) ---
+// As implementações abaixo são simulações locais: não conectam a provedores
+// nem entregam mensagens reais. Sucesso indica somente que a simulação terminou
+// sem erro, não a entrega de SMS ou e-mail.
 
-// SMSNotificador simula o envio de SMS.
+// SMSNotificador simula o envio de SMS; não entrega uma mensagem real.
 type SMSNotificador struct{}
 
 func (SMSNotificador) Canal() string { return "sms" }
@@ -99,7 +101,7 @@ func (SMSNotificador) Enviar(ctx context.Context, destinatario, mensagem string)
 	}
 }
 
-// EmailNotificador simula o envio de e-mail.
+// EmailNotificador simula o envio de e-mail; não entrega uma mensagem real.
 type EmailNotificador struct{}
 
 func (EmailNotificador) Canal() string { return "email" }

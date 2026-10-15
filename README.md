@@ -72,11 +72,30 @@ Somente latitude/longitude são enviadas (nenhum dado pessoal), com `User-Agent`
 
 **Se a API falhar** (fora do ar, timeout, resposta inválida), o alerta é registrado e as
 notificações são enviadas normalmente — só sem endereço — e o erro vai para o log.
-As coordenadas são sempre a informação principal. A consulta roda em paralelo às notificações.
+As coordenadas são sempre a informação principal. A consulta roda em paralelo às notificações,
+mas o serviço aguarda o resultado até o timeout configurado antes de concluir o alerta.
 O Nominatim público aceita ~1 requisição/s; para uso real, aponte `EXTERNAL_API_URL` para instância própria.
 
-> As notificações SMS/e-mail continuam **simuladas** (não há credenciais de operadora);
-> a interface `Notificador` permite plugar um provedor real.
+> `SMSNotificador` e `EmailNotificador` são **simulações locais**: não conectam a provedores
+> e não entregam SMS ou e-mails reais. `sucesso: true` registra apenas que a simulação
+> terminou sem erro; não confirma entrega. A interface `Notificador` permite uma integração
+> futura com provedor, que não faz parte desta versão.
+
+### Campo `silencioso`
+
+O campo opcional `silencioso` é aceito e preservado no alerta como preferência para a
+interface/aparelho ou possível funcionalidade futura. Atualmente ele não altera a seleção
+de destinatários nem o despacho: as notificações simuladas seguem o mesmo fluxo,
+independentemente do valor. A ausência do campo continua compatível com as requisições atuais.
+
+### ZIP para entrega
+
+Para preparar uma cópia limpa no Windows/PowerShell, gere o arquivo a partir do diretório
+do projeto, excluindo metadados Git e artefatos locais. Preserve o código, `go.mod`, `go.sum`,
+`.env.example`, documentação e testes. Não inclua `.git/`, `.env`, `botao_panico.db`,
+`coverage`, `coverage.out`, `coverage.html` nem executáveis compilados. Esses arquivos locais
+não são necessários para executar/testar; o banco é criado ao iniciar o serviço. O `.gitignore`
+ajuda a evitar inclusão acidental no controle de versão, mas não filtra automaticamente ZIPs.
 
 ## Como rodar os testes
 

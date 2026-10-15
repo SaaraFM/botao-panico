@@ -1,0 +1,261 @@
+
+@baseUrl = http://localhost:8080
+
+# Após executar um POST de criação, copie o ID retornado na resposta
+# e substitua o marcador abaixo para testar a persistência.
+@idAlertaPersistencia = SUBSTITUA_PELO_ID_DO_ALERTA_CRIADO
+
+
+# ==========================================================
+# 1. TESTAR A SAÚDE DA API
+# ==========================================================
+
+### 1. CORRETO — API funcionando (HTTP 200)
+GET {{baseUrl}}/health
+Accept: application/json
+
+# ALTERNATIVA PARA DEMONSTRAR ERRO 404:
+# GET {{baseUrl}}/rota-que-nao-existe
+# Accept: application/json
+
+
+# ==========================================================
+# 2. CRIAR ALERTA
+# ==========================================================
+
+### 2. CORRETO — Criar alerta válido (HTTP 201)
+# @name criarAlerta
+POST {{baseUrl}}/alertas
+Content-Type: application/json
+
+{
+  "usuaria_id": "usuaria-demo",
+  "nivel": "moderado",
+  "mensagem": "Teste acadêmico com dados válidos",
+  "local": {
+    "latitude": -28.9346,
+    "longitude": -49.4957
+  },
+  "silencioso": true
+}
+
+# ALTERNATIVA INCORRETA:
+# Troque somente "moderado" por "urgente".
+# Resultado esperado: HTTP 422.
+#
+# "nivel": "urgente"
+
+
+# ==========================================================
+# 3. LISTAR ALERTAS
+# ==========================================================
+
+### 3. CORRETO — Listar alertas (HTTP 200)
+GET {{baseUrl}}/alertas
+Accept: application/json
+
+# ALTERNATIVA PARA ERRO DE ROTA:
+# GET {{baseUrl}}/alertas-inexistentes
+# Accept: application/json
+
+
+# ==========================================================
+# 4. BUSCAR ALERTA PELO ID
+# ==========================================================
+
+### 4. CORRETO — Buscar alerta criado (HTTP 200)
+GET {{baseUrl}}/alertas/{{criarAlerta.response.body.$.id}}
+Accept: application/json
+
+# ALTERNATIVA INCORRETA — ID inexistente (HTTP 404):
+# GET {{baseUrl}}/alertas/id-inexistente-demonstracao
+# Accept: application/json
+
+
+# ==========================================================
+# 5. BUSCAR ALERTA INEXISTENTE
+# ==========================================================
+
+### 5. INCORRETO — Buscar ID inexistente (HTTP 404)
+GET {{baseUrl}}/alertas/id-inexistente-demonstracao
+Accept: application/json
+
+# ALTERNATIVA CORRETA — ID existente (HTTP 200):
+# GET {{baseUrl}}/alertas/{{idAlertaPersistencia}}
+# Accept: application/json
+
+
+# ==========================================================
+# 6. VALIDAR CAMPOS DO ALERTA
+# ==========================================================
+
+### 6. INCORRETO — Dados inválidos (HTTP 422)
+POST {{baseUrl}}/alertas
+Content-Type: application/json
+
+{
+  "nivel": "urgente",
+  "mensagem": "",
+  "local": {
+    "latitude": 0,
+    "longitude": 0
+  },
+  "silencioso": false
+}
+
+# VERSÃO CORRETA:
+# Substitua o JSON acima por:
+#
+# {
+#   "usuaria_id": "usuaria-demo",
+#   "nivel": "alto",
+#   "mensagem": "Teste acadêmico válido",
+#   "local": {
+#     "latitude": -28.9346,
+#     "longitude": -49.4957
+#   },
+#   "silencioso": false
+# }
+#
+# Resultado esperado: HTTP 201.
+
+
+# ==========================================================
+# 7. LISTAR INSTITUIÇÕES
+# ==========================================================
+
+### 7. CORRETO — Listar instituições (HTTP 200)
+GET {{baseUrl}}/instituicoes
+Accept: application/json
+
+# ALTERNATIVA PARA DEMONSTRAR ERRO DE ROTA:
+# GET {{baseUrl}}/instituicoes-inexistentes
+# Accept: application/json
+
+
+# ==========================================================
+# 8. PERSISTÊNCIA — ANTES DO REINÍCIO
+# ==========================================================
+
+### 8. CORRETO — Consultar alerta salvo (HTTP 200)
+GET {{baseUrl}}/alertas/{{idAlertaPersistencia}}
+Accept: application/json
+
+# ALTERNATIVA INCORRETA — ID inexistente (HTTP 404):
+# GET {{baseUrl}}/alertas/id-inexistente-demonstracao
+# Accept: application/json
+
+
+# ==========================================================
+# 9. PERSISTÊNCIA — DEPOIS DO REINÍCIO
+# ==========================================================
+
+# Primeiro:
+# 1. Execute a requisição 8.
+# 2. Pare a API com Shift+F5.
+# 3. Reinicie pelo F5.
+# 4. Execute a requisição abaixo.
+
+### 9. CORRETO — Mesmo alerta após reiniciar (HTTP 200)
+GET {{baseUrl}}/alertas/{{idAlertaPersistencia}}
+Accept: application/json
+
+# ALTERNATIVA — ID digitado diretamente (TAMBÉM CORRETO):
+# GET {{baseUrl}}/alertas/{{idAlertaPersistencia}}
+# Accept: application/json
+#
+# ALTERNATIVA INCORRETA — ID inexistente (HTTP 404):
+# GET {{baseUrl}}/alertas/id-inexistente-demonstracao
+# Accept: application/json
+#
+# ATENÇÃO:
+# O teste de persistência é comparar o MESMO alerta antes
+# e depois do reinício, não provocar um erro 404.
+
+
+# ==========================================================
+# 10. NOTIFICAÇÕES SIMULADAS
+# ==========================================================
+
+### 10. CORRETO — Alerta alto com notificações (HTTP 201)
+# @name criarAlertaAlto
+POST {{baseUrl}}/alertas
+Content-Type: application/json
+
+{
+  "usuaria_id": "usuaria-demo",
+  "nivel": "alto",
+  "mensagem": "TESTE ACADÊMICO — acionamento fictício",
+  "local": {
+    "latitude": -28.9346,
+    "longitude": -49.4957
+  },
+  "silencioso": true
+}
+
+# ALTERNATIVA — SEM DESTINATÁRIOS NO CENÁRIO TESTADO:
+#
+# Substitua:
+# "usuaria_id": "usuaria-demo"
+# por:
+# "usuaria_id": "usuaria-demonstracao"
+#
+# E substitua:
+# "nivel": "alto"
+# por:
+# "nivel": "moderado"
+#
+# Resultado observado anteriormente:
+# HTTP 201 e "notificacoes": [].
+#
+# Isso NÃO é erro HTTP.
+# Apenas demonstra outra regra de negócio.
+
+
+# ==========================================================
+# 11. CONSULTAR ALERTA ALTO
+# ==========================================================
+
+### 11. CORRETO — Consultar alerta alto criado (HTTP 200)
+GET {{baseUrl}}/alertas/{{criarAlertaAlto.response.body.$.id}}
+Accept: application/json
+
+# ALTERNATIVA INCORRETA — ID inexistente (HTTP 404):
+# GET {{baseUrl}}/alertas/id-inexistente-demonstracao
+# Accept: application/json
+
+
+### 12. Nominatim indisponível — teste de infraestrutura
+POST {{baseUrl}}/alertas
+Content-Type: application/json
+
+{
+  "usuaria_id": "usuaria-demo",
+  "nivel": "alto",
+  "mensagem": "TESTE ACADÊMICO — indisponibilidade simulada do Nominatim",
+  "local": {
+    "latitude": -28.9346,
+    "longitude": -49.4957
+  },
+  "silencioso": true
+}
+
+### 13. TESTE CORRETO — Verificar se o Nominatim voltou a funcionar
+# Esperado: HTTP 201 Created
+# O campo endereco_aproximado deve aparecer preenchido.
+# Os dados são fictícios e as notificações são simuladas.
+
+POST {{baseUrl}}/alertas
+Content-Type: application/json
+Accept: application/json
+
+{
+  "usuaria_id": "usuaria-demo",
+  "nivel": "alto",
+  "mensagem": "TESTE ACADÊMICO — Nominatim funcionando normalmente",
+  "local": {
+    "latitude": -28.9346,
+    "longitude": -49.4957
+  },
+  "silencioso": true
+}

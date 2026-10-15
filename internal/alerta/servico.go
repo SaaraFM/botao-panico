@@ -99,8 +99,11 @@ func (s *Servico) Acionar(ctx context.Context, pedido PedidoAlerta) (Alerta, err
 	ctxEnvio, cancelar := context.WithTimeout(ctx, s.timeoutPorAlerta)
 	defer cancelar()
 
-	// A geocodificação roda em paralelo às notificações (goroutine + canal):
-	// ela é auxiliar e nunca atrasa nem bloqueia o pedido de socorro.
+	// A geocodificação roda em paralelo às notificações (goroutine + canal),
+	// mas Acionar aguarda seu resultado. A chamada respeita timeoutPorAlerta;
+	// falha ou timeout da API Nominatim gera endereço vazio e não impede
+	// a conclusão do alerta. Silencioso é preservado como preferência da
+	// interface e não modifica o despacho de notificações.
 	enderecoCh := make(chan string, 1)
 	go func() { enderecoCh <- s.geocodificar(ctxEnvio, pedido.Local) }()
 

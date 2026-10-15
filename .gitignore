@@ -7,6 +7,9 @@
 # Variáveis de ambiente com valores reais
 .env
 
+# Relatório local de testes (não publicar no repositório)
+RELATORIO_TESTES.md
+
 # Binários compilados
 /bin/
 /botao-panico

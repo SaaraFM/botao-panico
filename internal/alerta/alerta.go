@@ -62,7 +62,9 @@ type PedidoAlerta struct {
 	Nivel      NivelRisco  `json:"nivel"`
 	Mensagem   string      `json:"mensagem"`
 	Local      Localizacao `json:"local"`
-	Silencioso bool        `json:"silencioso"` // alerta discreto, sem aviso sonoro no aparelho
+	// Silencioso registra uma preferência para a interface/aparelho. No serviço
+	// atual, não altera destinatários nem o despacho de notificações.
+	Silencioso bool `json:"silencioso"`
 }
 
 // Alerta é o registro completo de um acionamento do botão de pânico.
@@ -76,6 +78,7 @@ type Alerta struct {
 	Mensagem           string             `json:"mensagem"`
 	Local              Localizacao        `json:"local"`
 	EnderecoAproximado string             `json:"endereco_aproximado,omitempty"`
+	// Silencioso preserva a preferência recebida; não suprime notificações.
 	Silencioso         bool               `json:"silencioso"`
 	Status             StatusAlerta       `json:"status"`
 	CriadoEm           time.Time          `json:"criado_em"`
