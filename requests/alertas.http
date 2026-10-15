@@ -1,8 +1,8 @@
 
 @baseUrl = http://localhost:8080
 
-# Após executar um POST de criação, copie o ID retornado na resposta
-# e substitua o marcador abaixo para testar a persistência.
+# Alternativa manual: copie o ID da resposta do POST 2 para esta variável.
+# Use-a nos GETs 8 e 9 se a referência dinâmica deixar de estar disponível.
 @idAlertaPersistencia = SUBSTITUA_PELO_ID_DO_ALERTA_CRIADO
 
 
@@ -137,9 +137,15 @@ Accept: application/json
 # 8. PERSISTÊNCIA — ANTES DO REINÍCIO
 # ==========================================================
 
-### 8. CORRETO — Consultar alerta salvo (HTTP 200)
-GET {{baseUrl}}/alertas/{{idAlertaPersistencia}}
+### 8. PERSISTÊNCIA — Consultar antes do reinício (HTTP 200)
+# Primeiro execute o POST 2 (criarAlerta). A referência usa o ID retornado.
+# Copie esse ID caso precise usar a alternativa manual após reiniciar o VS Code.
+GET {{baseUrl}}/alertas/{{criarAlerta.response.body.$.id}}
 Accept: application/json
+
+# Alternativa manual: preencha @idAlertaPersistencia e use esta URL no lugar da acima.
+# GET {{baseUrl}}/alertas/{{idAlertaPersistencia}}
+# Accept: application/json
 
 # ALTERNATIVA INCORRETA — ID inexistente (HTTP 404):
 # GET {{baseUrl}}/alertas/id-inexistente-demonstracao
@@ -150,27 +156,22 @@ Accept: application/json
 # 9. PERSISTÊNCIA — DEPOIS DO REINÍCIO
 # ==========================================================
 
-# Primeiro:
-# 1. Execute a requisição 8.
-# 2. Pare a API com Shift+F5.
-# 3. Reinicie pelo F5.
-# 4. Execute a requisição abaixo.
+# Demonstração da persistência:
+# 1. Execute primeiro o POST 2 e copie o ID retornado.
+# 2. Execute a requisição 8 para consultar antes do reinício (HTTP 200).
+# 3. Pare a API com Shift+F5 e inicie novamente com F5.
+# 4. Execute a requisição 9 para consultar o mesmo ID (HTTP 200).
+# 5. Confirme que o ID e os dados do alerta correspondem aos da requisição 8.
+# Se a referência dinâmica não estiver disponível após reiniciar o VS Code,
+# coloque o ID copiado em @idAlertaPersistencia e use a URL manual comentada abaixo.
 
-### 9. CORRETO — Mesmo alerta após reiniciar (HTTP 200)
-GET {{baseUrl}}/alertas/{{idAlertaPersistencia}}
+### 9. PERSISTÊNCIA — Consultar o mesmo alerta após reiniciar (HTTP 200)
+GET {{baseUrl}}/alertas/{{criarAlerta.response.body.$.id}}
 Accept: application/json
 
-# ALTERNATIVA — ID digitado diretamente (TAMBÉM CORRETO):
+# Alternativa manual: preencha @idAlertaPersistencia e use esta URL no lugar da acima.
 # GET {{baseUrl}}/alertas/{{idAlertaPersistencia}}
 # Accept: application/json
-#
-# ALTERNATIVA INCORRETA — ID inexistente (HTTP 404):
-# GET {{baseUrl}}/alertas/id-inexistente-demonstracao
-# Accept: application/json
-#
-# ATENÇÃO:
-# O teste de persistência é comparar o MESMO alerta antes
-# e depois do reinício, não provocar um erro 404.
 
 
 # ==========================================================

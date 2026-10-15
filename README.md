@@ -63,6 +63,14 @@ Driver `modernc.org/sqlite` (Go puro). Tabelas criadas automaticamente com
 Dados de exemplo inseridos com `INSERT OR IGNORE`. Gravações usam transações e consultas parametrizadas.
 Os dados persistem após reiniciar (teste `TestSQLite_PersisteAposReabrir`).
 
+Para demonstrar a persistência com `requests/alertas.http`, inicie a API pelo F5
+no VS Code e execute primeiro o POST 2. Execute o GET 8 antes de reiniciar; depois
+pare a API com Shift+F5, inicie-a novamente com F5 e execute o GET 9. Os dois GETs
+consultam o mesmo ID retornado pelo POST e devem responder HTTP 200 com os mesmos
+dados. Se a referência dinâmica `{{criarAlerta.response.body.$.id}}` não estiver
+disponível (por exemplo, após reiniciar o VS Code), copie o ID da resposta do POST
+para `@idAlertaPersistencia` e use a URL manual comentada nos GETs 8 e 9.
+
 ## API externa (Nominatim / OpenStreetMap)
 
 `internal/cliente/nominatim.go` faz geocodificação reversa: converte as coordenadas
