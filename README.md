@@ -10,15 +10,16 @@ situações de risco alto ou crítico — também a rede institucional de prote�
 
 ## Como rodar
 
-Requisito: Go 1.24+. Não precisa de compilador C nem de servidor de banco.
+Requisito: Go 1.24.13 ou superior. Não precisa de compilador C nem de servidor de banco.
 
 ```bash
-cp .env.example .env        # opcional: ajuste os valores
-export $(grep -v '^#' .env | xargs)   # carrega as variáveis (ou use os padrões)
 go run ./cmd/api
 ```
 
 O serviço sobe em `http://localhost:8080` e cria o arquivo `botao_panico.db`.
+O comando usa os valores padrão da tabela abaixo. Para personalizar a configuração,
+defina as variáveis de ambiente no terminal antes de executar o serviço. O arquivo
+`.env.example` serve como referência; o programa não carrega um arquivo `.env` automaticamente.
 
 ### Variáveis de ambiente
 
@@ -63,13 +64,14 @@ Driver `modernc.org/sqlite` (Go puro). Tabelas criadas automaticamente com
 Dados de exemplo inseridos com `INSERT OR IGNORE`. Gravações usam transações e consultas parametrizadas.
 Os dados persistem após reiniciar (teste `TestSQLite_PersisteAposReabrir`).
 
-Para demonstrar a persistência com `requests/alertas.http`, inicie a API pelo F5
-no VS Code e execute primeiro o POST 2. Execute o GET 8 antes de reiniciar; depois
-pare a API com Shift+F5, inicie-a novamente com F5 e execute o GET 9. Os dois GETs
-consultam o mesmo ID retornado pelo POST e devem responder HTTP 200 com os mesmos
-dados. Se a referência dinâmica `{{criarAlerta.response.body.$.id}}` não estiver
-disponível (por exemplo, após reiniciar o VS Code), copie o ID da resposta do POST
-para `@idAlertaPersistencia` e use a URL manual comentada nos GETs 8 e 9.
+Para demonstrar a persistência com `requests/alertas.http`, inicie a API e execute
+primeiro o POST 2. Copie o ID retornado e coloque-o em `@idAlertaPersistencia` no
+início do arquivo. Use esse ID no GET 8 e execute a consulta antes de reiniciar a
+API; depois reinicie o serviço e consulte o mesmo ID no GET 9. Ambos devem responder
+HTTP 200 com os mesmos dados. A consulta dinâmica do GET 9 também pode usar o ID
+retornado pelo POST 2, desde que o cliente de requisições ainda tenha essa resposta
+disponível. No arquivo atual, o GET 8 está configurado com um ID inexistente e retorna
+HTTP 404; substitua-o pelo ID do alerta para realizar a demonstração de persistência.
 
 ## API externa (Nominatim / OpenStreetMap)
 
@@ -95,15 +97,6 @@ O campo opcional `silencioso` é aceito e preservado no alerta como preferência
 interface/aparelho ou possível funcionalidade futura. Atualmente ele não altera a seleção
 de destinatários nem o despacho: as notificações simuladas seguem o mesmo fluxo,
 independentemente do valor. A ausência do campo continua compatível com as requisições atuais.
-
-### ZIP para entrega
-
-Para preparar uma cópia limpa no Windows/PowerShell, gere o arquivo a partir do diretório
-do projeto, excluindo metadados Git e artefatos locais. Preserve o código, `go.mod`, `go.sum`,
-`.env.example`, documentação e testes. Não inclua `.git/`, `.env`, `botao_panico.db`,
-`coverage`, `coverage.out`, `coverage.html` nem executáveis compilados. Esses arquivos locais
-não são necessários para executar/testar; o banco é criado ao iniciar o serviço. O `.gitignore`
-ajuda a evitar inclusão acidental no controle de versão, mas não filtra automaticamente ZIPs.
 
 ## Como rodar os testes
 
@@ -141,13 +134,13 @@ internal/httpapi/         → API REST em JSON e mapeamento de erros
 | context.Context                             | timeout de envio em `Servico.Acionar` e cancelamento nos notificadores |
 | Testes com testing e testify                | `*_test.go` (unitários, table-driven, mocks e testes de API com httptest) |
 
-## Decisões de design
+## Decisões de implementação
 
-- **Concorrência real:** cada notificação é enviada por uma goroutine. O teste
-  `TestDespachar_EnviaParaTodosEmParalelo` prova o ganho: 10 envios de 100 ms
-  terminam em ~100 ms, não em ~1 s.
-- **Timeout com context.Context:** se uma operadora travar, o alerta não fica
-  pendurado — o contexto expira em 5 segundos e o resultado é registrado.
-- **Dados de exemplo:** o banco já nasce (INSERT OR IGNORE) com contatos da
-  `usuaria-demo` e a rede de proteção de Araranguá, permitindo demonstrar o
-  serviço logo na primeira execução.
+As notificações são processadas em paralelo usando goroutines. Um teste com dez envios
+simulados confirma que eles podem ser concluídos ao mesmo tempo. O serviço também usa
+`context.Context` para limitar o tempo de espera pelas notificações; o prazo padrão é
+de cinco segundos e pode ser alterado pela variável `NOTIFICATION_TIMEOUT`.
+
+Na primeira execução, o SQLite cria as tabelas e inclui dados de exemplo para a
+`usuaria-demo` e para as instituições de apoio de Araranguá. Esses dados permitem
+experimentar os endpoints sem precisar cadastrá-los manualmente.
