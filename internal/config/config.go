@@ -14,6 +14,8 @@ import (
 // Config reúne todos os parâmetros do microserviço.
 type Config struct {
 	Porta               string        // PORT
+	PortaGRPC           string        // GRPC_PORT (porta do servidor gRPC)
+	HostGRPC            string        // GRPC_HOST (padrão seguro localhost: 127.0.0.1)
 	URLBanco            string        // DATABASE_URL (DSN do SQLite)
 	URLAPIExterna       string        // EXTERNAL_API_URL (vazio desativa a geocodificação)
 	TimeoutAPIExterna   time.Duration // EXTERNAL_API_TIMEOUT
@@ -27,6 +29,8 @@ type Config struct {
 const (
 	PortaPadrao               = "8080"
 	PortaIntegracao           = "8081" // Porta recomendada para integração com Plataforma da Mulher
+	PortaGRPCPadrao           = "50051"
+	HostGRPCPadrao            = "127.0.0.1" // Padrão seguro restrito a localhost
 	URLBancoPadrao            = "file:botao_panico.db"
 	URLAPIExternaPadrao       = "https://nominatim.openstreetmap.org"
 	TimeoutAPIExternaPadrao   = 3 * time.Second
@@ -52,6 +56,8 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 	var errs []error
 	cfg := Config{
 		Porta:              ler("PORT", PortaPadrao),
+		PortaGRPC:          ler("GRPC_PORT", PortaGRPCPadrao),
+		HostGRPC:           ler("GRPC_HOST", HostGRPCPadrao),
 		URLBanco:           ler("DATABASE_URL", URLBancoPadrao),
 		URLAPIExterna:      ler("EXTERNAL_API_URL", URLAPIExternaPadrao),
 		AgenteAPIExterna:   ler("EXTERNAL_API_USER_AGENT", AgentePadrao),
@@ -61,6 +67,15 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 
 	if p, err := strconv.Atoi(cfg.Porta); err != nil || p < 1 || p > 65535 {
 		errs = append(errs, fmt.Errorf("PORT inválida %q: use um número entre 1 e 65535", cfg.Porta))
+	}
+	if p, err := strconv.Atoi(cfg.PortaGRPC); err != nil || p < 1 || p > 65535 {
+		errs = append(errs, fmt.Errorf("GRPC_PORT inválida %q: use um número entre 1 e 65535", cfg.PortaGRPC))
+	}
+	if cfg.Porta == cfg.PortaGRPC {
+		errs = append(errs, fmt.Errorf("PORT e GRPC_PORT não podem usar a mesma porta (%s)", cfg.Porta))
+	}
+	if cfg.HostGRPC == "" {
+		cfg.HostGRPC = HostGRPCPadrao
 	}
 	if cfg.URLBanco == "" {
 		errs = append(errs, errors.New("DATABASE_URL não pode ser vazia"))
@@ -107,6 +122,11 @@ func (c Config) GeocodificacaoAtiva() bool {
 // AutenticacaoAtiva indica se a autenticação serviço-a-serviço está configurada.
 func (c Config) AutenticacaoAtiva() bool {
 	return c.ChaveServico != ""
+}
+
+// EnderecoGRPC devolve o host:porta formatado para o listener gRPC.
+func (c Config) EnderecoGRPC() string {
+	return c.HostGRPC + ":" + c.PortaGRPC
 }
 
 func lerDuracao(valor string, padrao time.Duration) (time.Duration, error) {

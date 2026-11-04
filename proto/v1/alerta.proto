@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package alerta.v1;
+
+option go_package = "github.com/plataforma-mulher/botao-panico/gen/alerta/v1;alertav1";
+
+import "google/protobuf/timestamp.proto";
+
+// NivelRisco expressa a gravidade do acionamento de emergência.
+enum NivelRisco {
+  NIVEL_RISCO_UNSPECIFIED = 0;
+  BAIXO = 1;
+  MODERADO = 2;
+  ALTO = 3;
+  CRITICO = 4;
+}
+
+// StatusAlerta representa o ciclo de vida do alerta no microserviço.
+enum StatusAlerta {
+  STATUS_UNSPECIFIED = 0;
+  CRIADO = 1;
+  PROCESSANDO = 2;
+  CONCLUIDO = 3;
+  FALHA = 4;
+}
+
+// Coordenadas geográficas WGS84 capturadas no momento do acionamento.
+message Coordenadas {
+  double latitude = 1;
+  double longitude = 2;
+}
+
+// Notificacao detalha o despacho simulado enviado para um canal específico.
+message Notificacao {
+  string canal = 1;
+  string destinatario = 2;
+  bool sucesso = 3;
+  string erro = 4;
+}
+
+// InstituicaoApoio representa os pontos da rede de proteção e atendimento.
+message InstituicaoApoio {
+  string nome = 1;
+  string telefone = 2;
+  string email = 3;
+  string endereco = 4;
+  string tipo = 5;
+}
+
+// Alerta consolida todas as informações do registro de pânico.
+message Alerta {
+  string id = 1;
+  string usuaria_id = 2;
+  NivelRisco nivel = 3;
+  string mensagem = 4;
+  Coordenadas localizacao = 5;
+  string endereco_aproximado = 6;
+  StatusAlerta status = 7;
+  google.protobuf.Timestamp criado_em = 8;
+  repeated Notificacao notificacoes = 9;
+  bool replay = 10;
+}
+
+// CriarAlertaRequest solicita o registro e despacho de um novo alerta.
+message CriarAlertaRequest {
+  string usuaria_id = 1;
+  NivelRisco nivel = 2;
+  string mensagem = 3;
+  Coordenadas localizacao = 4;
+  bool silencioso = 5;
+  string chave_idempotencia = 6;
+}
+
+// CriarAlertaResponse retorna o alerta persistido e indicação de idempotência.
+message CriarAlertaResponse {
+  Alerta alerta = 1;
+  bool replay = 2;
+}
+
+// BuscarAlertaRequest busca um alerta por seu identificador único.
+message BuscarAlertaRequest {
+  string id = 1;
+}
+
+// BuscarAlertaResponse retorna os dados do alerta encontrado.
+message BuscarAlertaResponse {
+  Alerta alerta = 1;
+}
+
+// ListarAlertasRequest exige a usuária_id para prevenir vazamento indiscriminado de dados.
+message ListarAlertasRequest {
+  string usuaria_id = 1;
+}
+
+// ListarAlertasResponse retorna a coleção de alertas da usuária solicitante.
+message ListarAlertasResponse {
+  repeated Alerta alertas = 1;
+}
+
+// ListarInstituicoesRequest solicita as instituições da rede de apoio cadastradas.
+message ListarInstituicoesRequest {}
+
+// ListarInstituicoesResponse retorna a listagem da rede de proteção.
+message ListarInstituicoesResponse {
+  repeated InstituicaoApoio instituicoes = 1;
+}
+
+// AlertasService é o serviço gRPC para integração de alto desempenho entre microserviços.
+service AlertasService {
+  rpc CriarAlerta(CriarAlertaRequest) returns (CriarAlertaResponse);
+  rpc BuscarAlerta(BuscarAlertaRequest) returns (BuscarAlertaResponse);
+  rpc ListarAlertas(ListarAlertasRequest) returns (ListarAlertasResponse);
+  rpc ListarInstituicoes(ListarInstituicoesRequest) returns (ListarInstituicoesResponse);
+}

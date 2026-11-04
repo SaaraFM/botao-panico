@@ -8,139 +8,185 @@ o botão, o serviço notifica **em paralelo** seus contatos de emergência e —
 situações de risco alto ou crítico — também a rede institucional de proteção
 (Polícia Militar, Delegacia da Mulher, CRAS e SAMU).
 
+O serviço expõe duas interfaces de comunicação simultâneas e integradas sobre a mesma camada de domínio:
+1. **API REST (HTTP/JSON)** na porta `8080` (ou `8081` para integração local), consumida pela Supabase Edge Function da Plataforma da Mulher.
+2. **API gRPC (HTTP/2 + Protocol Buffers binário)** na porta `50051`, voltada para comunicação de alta performance entre microserviços e integração institucional segura.
+
+---
+
 ## Como rodar
 
-Requisito: Go 1.24.13 ou superior. Não precisa de compilador C nem de servidor de banco.
+Requisito: Go 1.24 ou superior. Não precisa de compilador C nem de servidor de banco externo.
 
 ```bash
 go run ./cmd/api
 ```
 
-O serviço sobe em `http://localhost:8080` e cria o arquivo `botao_panico.db`.
-O comando usa os valores padrão da tabela abaixo. Para personalizar a configuração,
-defina as variáveis de ambiente no terminal antes de executar o serviço. O arquivo
-`.env.example` serve como referência; o programa não carrega um arquivo `.env` automaticamente.
+O serviço sobe simultaneamente:
+- **REST**: `http://localhost:8080`
+- **gRPC**: `127.0.0.1:50051` (restrito a localhost por segurança)
+- Banco de dados SQLite criado automaticamente: `botao_panico.db`.
 
 ### Variáveis de ambiente
 
 | Variável | Padrão | Descrição |
 | --- | --- | --- |
-| `PORT` | `8080` | Porta HTTP |
+| `PORT` | `8080` | Porta HTTP REST (use `8081` para integração com Plataforma da Mulher) |
+| `GRPC_PORT` | `50051` | Porta do servidor gRPC |
+| `GRPC_HOST` | `127.0.0.1` | Host de escuta gRPC (padrão seguro restrito a localhost) |
+| `SERVICE_KEY` | *(vazio)* | Chave secreta serviço-a-serviço (mínimo 16 caracteres) |
+| `EXIGIR_AUTENTICACAO` | `false` | Se `true`, falha a inicialização caso `SERVICE_KEY` esteja ausente |
 | `DATABASE_URL` | `file:botao_panico.db` | DSN do SQLite próprio do serviço |
 | `EXTERNAL_API_URL` | `https://nominatim.openstreetmap.org` | API de geocodificação (vazio desativa) |
 | `EXTERNAL_API_TIMEOUT` | `3s` | Timeout de cada chamada externa |
 | `EXTERNAL_API_USER_AGENT` | identificação do trabalho | Exigido pela política do Nominatim |
 | `NOTIFICATION_TIMEOUT` | `5s` | Prazo para concluir as notificações |
 
-A configuração é validada na inicialização (porta, URL, durações).
+A configuração é validada estritamente na inicialização (portas, URLs, durações e conflito entre portas).
 
-### Acionando o botão de pânico
+---
+
+## 1. Comunicação via REST (HTTP/JSON)
+
+### Acionando o botão de pânico via curl
 
 ```bash
 curl -X POST http://localhost:8080/alertas \
   -H "Content-Type: application/json" \
+  -H "X-Service-Token: sua-chave-secreta-se-configurada" \
   -d '{"usuaria_id":"usuaria-demo","nivel":"alto","mensagem":"estou sendo seguida","local":{"latitude":-28.9346,"longitude":-49.4957}}'
 ```
 
-### Endpoints
+### Endpoints REST
 
 | Método | Rota | Sucesso | Erros possíveis |
 | --- | --- | --- | --- |
 | GET | `/health` | 200 | — |
-| POST | `/alertas` | 201 | 400, 413, 422, 500, 503 |
-| GET | `/alertas` | 200 | 500, 503 |
-| GET | `/alertas/{id}` | 200 | 404, 500, 503 |
+| POST | `/alertas` | 201 (ou 200 Replay) | 400, 401, 409, 413, 422, 500, 503 |
+| GET | `/alertas` | 200 | 401, 500, 503 |
+| GET | `/alertas/{id}` | 200 | 401, 404, 500, 503 |
 | GET | `/instituicoes` | 200 | 500, 503 |
 
 Formato padrão de erro: `{"erro": "mensagem", "codigo": "CODIGO"}` (+ `campos` na validação).
-Códigos: `JSON_INVALIDO`, `CORPO_MUITO_GRANDE`, `DADOS_INVALIDOS`, `NAO_ENCONTRADO`,
-`BANCO_INDISPONIVEL`, `TEMPO_ESGOTADO`, `ERRO_INTERNO`. Mensagens de SQL/rede ficam só no log.
+Códigos: `JSON_INVALIDO`, `CORPO_MUITO_GRANDE`, `DADOS_INVALIDOS`, `NAO_AUTORIZADO`, `CONFLITO_IDEMPOTENCIA`, `NAO_ENCONTRADO`, `BANCO_INDISPONIVEL`, `TEMPO_ESGOTADO`, `ERRO_INTERNO`.
 
-## Banco de dados (SQLite próprio)
+---
+
+## 2. Comunicação via gRPC e Protocol Buffers (CIT7219 — Semanas 09 e 11)
+
+A API gRPC implementa o contrato definido em `proto/v1/alerta.proto` (pacote versionado `alerta.v1`), gerando serialização binária compacta com verificação estrita de schema.
+
+### Versões das Ferramentas e Dependências
+- **Compilador Protoc**: `libprotoc 36.2`
+- **Plugin Go Protoc (`protoc-gen-go`)**: `v1.36.12`
+- **Plugin Go gRPC (`protoc-gen-go-grpc`)**: `v1.6.2`
+- **Módulo gRPC (`google.golang.org/grpc`)**: `v1.85.0`
+- **Módulo Protobuf (`google.golang.org/protobuf`)**: `v1.36.12`
+
+### Métodos gRPC Disponíveis
+
+| Método RPC | Requisição | Resposta | Descrição |
+| --- | --- | --- | --- |
+| `CriarAlerta` | `CriarAlertaRequest` | `CriarAlertaResponse` | Registra alerta no SQLite com geocodificação e notificações paralelas. Suporta idempotência (`replay: true`). |
+| `BuscarAlerta` | `BuscarAlertaRequest` | `BuscarAlertaResponse` | Consulta os dados de um alerta por ID. Retorna `NotFound` se inexistente. |
+| `ListarAlertas` | `ListarAlertasRequest` | `ListarAlertasResponse` | **Segurança de Privacidade**: Exige `usuaria_id` no payload. Rejeita listagens globais indiscriminadas (`InvalidArgument`). |
+| `ListarInstituicoes` | `ListarInstituicoesRequest` | `ListarInstituicoesResponse` | Retorna as instituições da rede de apoio de Araranguá/SC. |
+
+> **Nota sobre Streaming (`MonitorarAlertas`)**: O método de streaming de alertas para salas de operação está documentado como evolução futura (Entrega posterior), mantendo os interceptors de streaming já testados e prontos.
+
+### Autenticação em gRPC
+O servidor instala os interceptors `AutenticarUnary` e `AutenticarStream` (`internal/grpcapi/interceptors.go`). As requisições devem enviar o token de serviço nos metadados gRPC:
+- Chave de metadado: `x-service-token: <SERVICE_KEY>` ou `authorization: Bearer <SERVICE_KEY>`.
+- Validação efetuada com comparação em tempo constante (`subtle.ConstantTimeCompare`).
+- Retorna `codes.Unauthenticated` caso a credencial esteja ausente ou incorreta.
+
+### Como Executar o Cliente gRPC de Demonstração
+
+O projeto inclui um cliente de demonstração completo em Go:
+
+```bash
+# 1. Com o servidor rodando em outro terminal:
+go run ./cmd/api
+
+# 2. Em um novo terminal, execute o cliente de demonstração:
+go run ./cmd/grpc-client
+```
+
+Se o servidor exigir autenticação:
+```powershell
+$env:SERVICE_KEY="sua-chave-secreta-12345"
+go run ./cmd/grpc-client
+```
+
+O cliente demonstrará automaticamente:
+1. `CriarAlerta` enviando payload binário Protocol Buffers.
+2. `BuscarAlerta` com os dados persistidos no SQLite.
+3. Retentativa com a mesma chave comprovando resposta idempotente (`replay: true`).
+4. `ListarInstituicoes` consultando os órgãos de Araranguá.
+
+---
+
+## 3. Banco de dados (SQLite próprio)
 
 Driver `modernc.org/sqlite` (Go puro). Tabelas criadas automaticamente com
 `CREATE TABLE IF NOT EXISTS` (idempotente) em `internal/armazenamento/sqlite.go`:
 `alertas`, `notificacoes`, `alerta_instituicoes`, `contatos_emergencia`, `instituicoes`.
-Dados de exemplo inseridos com `INSERT OR IGNORE`. Gravações usam transações e consultas parametrizadas.
-Os dados persistem após reiniciar (teste `TestSQLite_PersisteAposReabrir`).
 
-Para demonstrar a persistência com `requests/alertas.http`, inicie a API e execute
-primeiro o POST 2. Copie o ID retornado e coloque-o em `@idAlertaPersistencia` no
-início do arquivo. Use esse ID no GET 8 e execute a consulta antes de reiniciar a
-API; depois reinicie o serviço e consulte o mesmo ID no GET 9. Ambos devem responder
-HTTP 200 com os mesmos dados. A consulta dinâmica do GET 9 também pode usar o ID
-retornado pelo POST 2, desde que o cliente de requisições ainda tenha essa resposta
-disponível. No arquivo atual, o GET 8 está configurado com um ID inexistente e retorna
-HTTP 404; substitua-o pelo ID do alerta para realizar a demonstração de persistência.
+Possui migração automática que adiciona as colunas `chave_idempotencia` e `hash_requisicao` com índice único caso o banco tenha sido criado em versões anteriores do projeto.
 
-## API externa (Nominatim / OpenStreetMap)
+---
 
-`internal/cliente/nominatim.go` faz geocodificação reversa: converte as coordenadas
-do alerta em um **endereço aproximado** (`endereco_aproximado`), útil para quem recebe o alerta.
-Usa `http.NewRequestWithContext`, timeout, fecha o `Body`, verifica o status e valida o JSON.
-Somente latitude/longitude são enviadas (nenhum dado pessoal), com `User-Agent` identificado.
+## 4. Como rodar os testes
 
-**Se a API falhar** (fora do ar, timeout, resposta inválida), o alerta é registrado e as
-notificações são enviadas normalmente — só sem endereço — e o erro vai para o log.
-As coordenadas são sempre a informação principal. A consulta roda em paralelo às notificações,
-mas o serviço aguarda o resultado até o timeout configurado antes de concluir o alerta.
-O Nominatim público aceita ~1 requisição/s; para uso real, aponte `EXTERNAL_API_URL` para instância própria.
-
-> `SMSNotificador` e `EmailNotificador` são **simulações locais**: não conectam a provedores
-> e não entregam SMS ou e-mails reais. `sucesso: true` registra apenas que a simulação
-> terminou sem erro; não confirma entrega. A interface `Notificador` permite uma integração
-> futura com provedor, que não faz parte desta versão.
-
-### Campo `silencioso`
-
-O campo opcional `silencioso` é aceito e preservado no alerta como preferência para a
-interface/aparelho ou possível funcionalidade futura. Atualmente ele não altera a seleção
-de destinatários nem o despacho: as notificações simuladas seguem o mesmo fluxo,
-independentemente do valor. A ausência do campo continua compatível com as requisições atuais.
-
-## Como rodar os testes
+Todos os testes podem ser executados com:
 
 ```bash
+# Análise estática de código
 go vet ./...
-go test ./...
+
+# Testes unitários e de integração (REST + gRPC + Domínio + SQLite)
+go test -v ./...
+
+# Detecção rigorosa de condições de corrida em goroutines concorrentes
 go test -race ./...
+
+# Relatório de cobertura de código
 go test -cover ./...
 ```
 
-## Estrutura em camadas
+---
+
+## 5. Estrutura em camadas
 
 ```
-cmd/api/main.go           → ponto de entrada, desligamento gracioso
-internal/config/          → variáveis de ambiente + validação
-internal/alerta/          → domínio, validação, regras de negócio e erros
-internal/armazenamento/   → repositório SQLite (real) e em memória (testes)
-internal/cliente/         → client HTTP da API externa (Nominatim)
-internal/notificacao/     → despacho paralelo de notificações (goroutines)
-internal/httpapi/         → API REST em JSON e mapeamento de erros
+cmd/api/main.go           → inicialização concorrente REST e gRPC, graceful shutdown
+cmd/grpc-client/main.go   → cliente gRPC de demonstração acadêmica
+proto/v1/alerta.proto     → contrato Protocol Buffers versionado (alerta.v1)
+gen/alerta/v1/            → stubs Go gerados pelo protoc (pb.go e grpc.pb.go)
+internal/config/          → variáveis de ambiente (REST, gRPC, timeouts) + validação
+internal/alerta/          → domínio, validação, regras de negócio e idempotência SHA-256
+internal/grpcapi/         → adaptador gRPC, conversão de DTOs e interceptors S2S
+internal/httpapi/         → adaptador REST HTTP/JSON e middleware S2S
+internal/armazenamento/   → repositório SQLite com idempotência persistente
+internal/cliente/         → client HTTP da API externa de geocodificação (Nominatim)
+internal/notificacao/     → despacho concorrente de notificações (goroutines + WaitGroup)
 ```
 
-## Onde cada conteúdo da disciplina aparece
+---
+
+## 6. Onde cada conteúdo da disciplina aparece
 
 | Conteúdo da disciplina                      | Onde está no código |
 | ------------------------------------------- | ------------------- |
 | Structs, arrays, slices e maps              | `internal/alerta/alerta.go`, `internal/armazenamento/` |
-| Ponteiros                                   | `*PedidoAlerta`, `*SQLite`, `*Servico` (alertas trafegam por valor para evitar condição de corrida) |
-| Tratamento de erros                         | `internal/alerta/erros.go`, `internal/httpapi/erros.go`, `errors.Is/As` |
-| Interfaces                                  | `Notificador`, `Repositorio`, `Geocodificador`, `ServicoAlertas` |
-| Pacotes e estrutura em camadas              | `internal/...` (domínio, serviço, armazenamento, HTTP) |
-| JSON e validação                            | `internal/httpapi/handlers.go`, `internal/alerta/validacao.go` |
-| Concorrência (goroutines e canais/select)   | `internal/notificacao/notificador.go` |
-| sync: WaitGroup e Mutex                     | `Despachante.Despachar`, `Repositorio` |
-| context.Context                             | timeout de envio em `Servico.Acionar` e cancelamento nos notificadores |
-| Testes com testing e testify                | `*_test.go` (unitários, table-driven, mocks e testes de API com httptest) |
-
-## Decisões de implementação
-
-As notificações são processadas em paralelo usando goroutines. Um teste com dez envios
-simulados confirma que eles podem ser concluídos ao mesmo tempo. O serviço também usa
-`context.Context` para limitar o tempo de espera pelas notificações; o prazo padrão é
-de cinco segundos e pode ser alterado pela variável `NOTIFICATION_TIMEOUT`.
-
-Na primeira execução, o SQLite cria as tabelas e inclui dados de exemplo para a
-`usuaria-demo` e para as instituições de apoio de Araranguá. Esses dados permitem
-experimentar os endpoints sem precisar cadastrá-los manualmente.
+| Ponteiros                                   | `*PedidoAlerta`, `*SQLite`, `*Servico` (alertas trafegam por valor para evitar race condition) |
+| Tratamento de erros e códigos gRPC          | `internal/alerta/erros.go`, `internal/grpcapi/conversores.go` (`codes.InvalidArgument`, `codes.AlreadyExists`, etc.) |
+| Interfaces                                  | `Notificador`, `Repositorio`, `Geocodificador`, `ServicoAlertas`, `alertav1.AlertasServiceServer` |
+| Pacotes e arquitetura limpa em camadas      | `internal/...` (domínio isolado consumido por adaptadores REST e gRPC) |
+| Protocol Buffers e Contratos IDL            | `proto/v1/alerta.proto`, geração em `gen/alerta/v1/` |
+| Comunicação RPC e gRPC                      | `internal/grpcapi/servidor.go`, `cmd/grpc-client/main.go` |
+| Interceptors gRPC (Unary e Streaming)       | `internal/grpcapi/interceptors.go` (autenticação S2S via metadados) |
+| Deadlines e Cancelamento distribuído        | `context.Context` com `context.WithDeadline` e `context.WithCancel` em REST e gRPC |
+| Concorrência (goroutines e canais/select)   | `internal/notificacao/despachante.go`, orquestração no `cmd/api/main.go` |
+| sync: WaitGroup, Mutex e sync.Map           | `Despachante.Despachar`, serialização de idempotência em `Servico.bloqueiosChave` |
+| Testes com testing, testify e bufconn       | `internal/grpcapi/servidor_test.go` (listener em memória sem abrir porta física), `*_test.go` |

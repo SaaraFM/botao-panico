@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,8 +21,10 @@ import (
 	"github.com/plataforma-mulher/botao-panico/internal/armazenamento"
 	"github.com/plataforma-mulher/botao-panico/internal/cliente"
 	"github.com/plataforma-mulher/botao-panico/internal/config"
+	"github.com/plataforma-mulher/botao-panico/internal/grpcapi"
 	"github.com/plataforma-mulher/botao-panico/internal/httpapi"
 	"github.com/plataforma-mulher/botao-panico/internal/notificacao"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -62,9 +65,11 @@ func executar() error {
 		geo = cliente.NovoNominatim(cfg.URLAPIExterna, cfg.AgenteAPIExterna, cfg.TimeoutAPIExterna)
 	}
 
-	// 4. Regras de negócio e 5. camada HTTP com proteção serviço-a-serviço.
+	// 4. Regras de negócio compartilhadas entre REST e gRPC.
 	servico := alerta.NovoServico(repo, despachante, geo, cfg.TimeoutNotificacoes)
-	servidor := &http.Server{
+
+	// 5. Camada HTTP REST (portas e endpoints para frontend e Edge Function).
+	servidorHTTP := &http.Server{
 		Addr:              ":" + cfg.Porta,
 		Handler:           httpapi.NovoServidor(servico, cfg.ChaveServico).Rotas(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -72,27 +77,62 @@ func executar() error {
 		WriteTimeout:      30 * time.Second,
 	}
 
-	erroServidor := make(chan error, 1)
+	// 6. Camada gRPC (comunicação entre microserviços com Protocol Buffers).
+	var grpcOpts []grpc.ServerOption
+	if cfg.AutenticacaoAtiva() {
+		grpcOpts = append(grpcOpts,
+			grpc.UnaryInterceptor(grpcapi.AutenticarUnary(cfg.ChaveServico)),
+			grpc.StreamInterceptor(grpcapi.AutenticarStream(cfg.ChaveServico)),
+		)
+	}
+	servidorGRPC := grpc.NewServer(grpcOpts...)
+	servicoGRPC := grpcapi.NovoServidor(servico, cfg.ChaveServico)
+	servicoGRPC.RegistrarServico(servidorGRPC)
+
+	listenerGRPC, err := net.Listen("tcp", cfg.EnderecoGRPC())
+	if err != nil {
+		return err
+	}
+	defer listenerGRPC.Close()
+
+	erroServidor := make(chan error, 2)
+
+	// Inicia REST
 	go func() {
-		slog.Info("Botão de Pânico ouvindo",
+		slog.Info("Botão de Pânico REST ouvindo",
 			"endereco", "http://localhost:"+cfg.Porta,
 			"banco", cfg.URLBanco,
 			"geocodificacao", cfg.GeocodificacaoAtiva(),
 			"autenticacao", cfg.AutenticacaoAtiva(),
 		)
-		erroServidor <- servidor.ListenAndServe()
+		if err := servidorHTTP.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			erroServidor <- err
+		}
+	}()
+
+	// Inicia gRPC (escutando em localhost/configurado)
+	go func() {
+		slog.Info("Botão de Pânico gRPC ouvindo",
+			"endereco", cfg.EnderecoGRPC(),
+			"autenticacao", cfg.AutenticacaoAtiva(),
+		)
+		if err := servidorGRPC.Serve(listenerGRPC); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			erroServidor <- err
+		}
 	}()
 
 	select {
 	case err := <-erroServidor:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-		return nil
+		return err
 	case <-ctx.Done():
-		slog.Info("encerrando o servidor...")
+		slog.Info("encerrando servidores REST e gRPC...")
 		ctxDesligar, cancelarDesligar := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelarDesligar()
-		return servidor.Shutdown(ctxDesligar)
+
+		// Encerramento gracioso gRPC
+		servidorGRPC.GracefulStop()
+
+		// Encerramento gracioso HTTP
+		return servidorHTTP.Shutdown(ctxDesligar)
 	}
 }
