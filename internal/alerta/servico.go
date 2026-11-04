@@ -3,6 +3,7 @@ package alerta
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,10 +28,22 @@ type RepositorioAlertas interface {
 	ListarAlertas(ctx context.Context) ([]Alerta, error)
 }
 
-// Repositorio reúne as duas interfaces acima; é o que o serviço precisa.
+// RepositorioOutbox gerencia as tarefas do Transactional Outbox para processamento assíncrono.
+type RepositorioOutbox interface {
+	SalvarAlertaComOutbox(ctx context.Context, a Alerta, t TarefaOutbox) error
+	BuscarTarefasPendentes(ctx context.Context, limite int) ([]TarefaOutbox, error)
+	MarcarTarefaPublicada(ctx context.Context, id string) error
+	MarcarTarefaConcluida(ctx context.Context, id string) error
+	IncrementarFalhaTarefa(ctx context.Context, id string, erroMsg string, proximaTentativa time.Time) error
+	BuscarTarefaPorID(ctx context.Context, id string) (TarefaOutbox, error)
+	BuscarTarefaPorAlertaID(ctx context.Context, alertaID string) (TarefaOutbox, error)
+}
+
+// Repositorio reúne as interfaces de armazenamento necessárias pelo serviço.
 type Repositorio interface {
 	RepositorioContatos
 	RepositorioAlertas
+	RepositorioOutbox
 }
 
 // DespachanteNotificacao envia as notificações (implementado com concorrência).
@@ -46,11 +59,14 @@ type Geocodificador interface {
 // Servico orquestra o fluxo completo do botão de pânico:
 // validar → verificar idempotência → registrar → notificar (+ geocodificar em paralelo) → atualizar.
 type Servico struct {
-	repositorio      Repositorio
-	despachante      DespachanteNotificacao
-	geocodificador   Geocodificador // opcional: pode ser nil
-	timeoutPorAlerta time.Duration
-	bloqueiosChave   sync.Map // chaveIdempotencia -> *sync.Mutex (concorrência local)
+	repositorio            Repositorio
+	despachante            DespachanteNotificacao
+	geocodificador         Geocodificador // opcional: pode ser nil
+	timeoutPorAlerta       time.Duration
+	bloqueiosChave         sync.Map // chaveIdempotencia -> *sync.Mutex (concorrência local)
+	bloqueiosProcessamento sync.Map // alertaID -> *sync.Mutex (concorrência de processamento)
+	modoAssincrono         bool
+	notificadorOutbox      func()
 }
 
 // NovoServico monta o serviço com suas dependências (injeção de dependência).
@@ -62,6 +78,17 @@ func NovoServico(repo Repositorio, desp DespachanteNotificacao, geo Geocodificad
 		geocodificador:   geo,
 		timeoutPorAlerta: timeout,
 	}
+}
+
+// AtivarModoAssincrono ativa o Transactional Outbox e conecta o gatilho do Relay.
+func (s *Servico) AtivarModoAssincrono(notificador func()) {
+	s.modoAssincrono = true
+	s.notificadorOutbox = notificador
+}
+
+// ModoAssincrono informa se o processamento por filas de mensagens está habilitado.
+func (s *Servico) ModoAssincrono() bool {
+	return s.modoAssincrono
 }
 
 // obterTrava garante exclusão mútua em nível de chave de idempotência para requisições concorrentes.
@@ -134,8 +161,68 @@ func (s *Servico) Acionar(ctx context.Context, pedido PedidoAlerta) (Alerta, err
 	}
 	a.InstituicoesAlvo = instituicoes
 
-	// Registro do alerta ANTES de notificar: se algo falhar depois,
-	// o acionamento já está gravado.
+	// FLUXO ASSÍNCRONO COM TRANSACTIONAL OUTBOX (Semana 12 CIT7219)
+	if s.modoAssincrono {
+		a.Status = StatusProcessando
+
+		tarefaID, err := novoID()
+		if err != nil {
+			return Alerta{}, fmt.Errorf("gerar id da tarefa outbox: %w", err)
+		}
+
+		evento := EventoAlertaCriado{
+			TarefaID:  "tarefa-" + tarefaID,
+			AlertaID:  a.ID,
+			UsuariaID: a.UsuariaID,
+			Nivel:     string(a.Nivel),
+			CriadoEm:  agora.Format(time.RFC3339Nano),
+		}
+		payloadBytes, err := json.Marshal(evento)
+		if err != nil {
+			return Alerta{}, fmt.Errorf("serializar evento outbox: %w", err)
+		}
+
+		tarefa := TarefaOutbox{
+			ID:                 "tarefa-" + tarefaID,
+			AlertaID:           a.ID,
+			Topico:             "alertas.notificar",
+			PayloadJSON:        string(payloadBytes),
+			Estado:             EstadoTarefaPendente,
+			MaxTentativas:      5,
+			ProximaTentativaEm: agora,
+			CriadoEm:           agora,
+			AtualizadoEm:       agora,
+		}
+
+		// Gravação atômica: Alerta + Tarefa Outbox no mesmo commit do SQLite
+		if err := s.repositorio.SalvarAlertaComOutbox(ctx, a, tarefa); err != nil {
+			return Alerta{}, fmt.Errorf("registrar alerta e outbox: %w", err)
+		}
+
+		// Geocodificação em background se disponível
+		if s.geocodificador != nil {
+			go func(alertaID string, loc Localizacao) {
+				ctxGeo, cancel := context.WithTimeout(context.Background(), s.timeoutPorAlerta)
+				defer cancel()
+				end := s.geocodificar(ctxGeo, loc)
+				if end != "" {
+					alt, err := s.repositorio.BuscarAlerta(context.Background(), alertaID)
+					if err == nil {
+						alt.EnderecoAproximado = end
+						_ = s.repositorio.AtualizarAlerta(context.Background(), alt)
+					}
+				}
+			}(a.ID, pedido.Local)
+		}
+
+		if s.notificadorOutbox != nil {
+			s.notificadorOutbox()
+		}
+
+		return a, nil
+	}
+
+	// FLUXO SÍNCRONO CONCORRENTE (compatibilidade de testes e execução sem broker)
 	if err := s.repositorio.SalvarAlerta(ctx, a); err != nil {
 		return Alerta{}, fmt.Errorf("registrar alerta: %w", err)
 	}
@@ -143,11 +230,6 @@ func (s *Servico) Acionar(ctx context.Context, pedido PedidoAlerta) (Alerta, err
 	ctxEnvio, cancelar := context.WithTimeout(ctx, s.timeoutPorAlerta)
 	defer cancelar()
 
-	// A geocodificação roda em paralelo às notificações (goroutine + canal),
-	// mas Acionar aguarda seu resultado. A chamada respeita timeoutPorAlerta;
-	// falha ou timeout da API Nominatim gera endereço vazio e não impede
-	// a conclusão do alerta. Silencioso é preservado como preferência da
-	// interface e não modifica o despacho de notificações.
 	enderecoCh := make(chan string, 1)
 	go func() { enderecoCh <- s.geocodificar(ctxEnvio, pedido.Local) }()
 
@@ -160,6 +242,49 @@ func (s *Servico) Acionar(ctx context.Context, pedido PedidoAlerta) (Alerta, err
 		return Alerta{}, fmt.Errorf("atualizar alerta %s: %w", a.ID, err)
 	}
 	return a, nil
+}
+
+// ProcessarTarefaNotificacao é invocado pelo worker de mensageria para executar as notificações simuladas.
+// Implementa idempotência no consumidor: se o alerta já estiver concluído, evita redespacho.
+func (s *Servico) ProcessarTarefaNotificacao(ctx context.Context, alertaID string) error {
+	val, _ := s.bloqueiosProcessamento.LoadOrStore(alertaID, &sync.Mutex{})
+	mtx := val.(*sync.Mutex)
+	mtx.Lock()
+	defer mtx.Unlock()
+
+	a, err := s.repositorio.BuscarAlerta(ctx, alertaID)
+	if err != nil {
+		return fmt.Errorf("buscar alerta para notificar: %w", err)
+	}
+
+	// Idempotência no Consumidor: se já estiver concluído, confirma sem reenviar
+	if a.Status == StatusConcluido {
+		return nil
+	}
+
+	pedido := PedidoAlerta{
+		UsuariaID: a.UsuariaID,
+		Nivel:     a.Nivel,
+		Mensagem:  a.Mensagem,
+	}
+
+	destinatarios, _, err := s.montarDestinatarios(ctx, pedido)
+	if err != nil {
+		return fmt.Errorf("montar destinatarios: %w", err)
+	}
+
+	ctxEnvio, cancelar := context.WithTimeout(ctx, s.timeoutPorAlerta)
+	defer cancelar()
+
+	notificacoes := s.despachante.Despachar(ctxEnvio, destinatarios, s.textoAlerta(pedido))
+	a.Notificacoes = notificacoes
+	a.Status = StatusConcluido
+	a.AtualizadoEm = time.Now().UTC()
+
+	if err := s.repositorio.AtualizarAlerta(ctx, a); err != nil {
+		return fmt.Errorf("atualizar alerta com notificacoes: %w", err)
+	}
+	return nil
 }
 
 // Buscar devolve um alerta pelo ID (ErrNaoEncontrado se não existir).

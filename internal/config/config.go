@@ -23,6 +23,15 @@ type Config struct {
 	TimeoutNotificacoes time.Duration // NOTIFICATION_TIMEOUT
 	ChaveServico        string        // SERVICE_KEY (chave serviço-a-serviço)
 	ExigirAutenticacao  bool          // EXIGIR_AUTENTICACAO (falha se não houver SERVICE_KEY válida)
+
+	// Configurações de Mensageria NATS JetStream (Semana 12 CIT7219)
+	FilasAtivas         bool          // FILAS_ATIVAS (habilita NATS e Outbox assíncrono)
+	URLNATS             string        // NATS_URL (ex.: nats://127.0.0.1:4222; vazio inicia embutido com arquivo)
+	StreamNATS          string        // NATS_STREAM (padrão: ALERTAS)
+	SubjectNATS         string        // NATS_SUBJECT (padrão: alertas.notificar)
+	ConsumerNATS        string        // NATS_CONSUMER (padrão: worker-notificacoes)
+	DiretorioNATS       string        // NATS_STORE_DIR (padrão: data/jetstream para persistência em disco)
+	TimeoutWorker       time.Duration // WORKER_SHUTDOWN_TIMEOUT
 }
 
 // Valores padrão para desenvolvimento local (sem nenhuma credencial).
@@ -31,6 +40,11 @@ const (
 	PortaIntegracao           = "8081" // Porta recomendada para integração com Plataforma da Mulher
 	PortaGRPCPadrao           = "50051"
 	HostGRPCPadrao            = "127.0.0.1" // Padrão seguro restrito a localhost
+	StreamNATSPadrao          = "ALERTAS"
+	SubjectNATSPadrao         = "alertas.notificar"
+	ConsumerNATSPadrao        = "worker-notificacoes"
+	DiretorioNATSPadrao       = "data/jetstream"
+	TimeoutWorkerPadrao       = 5 * time.Second
 	URLBancoPadrao            = "file:botao_panico.db"
 	URLAPIExternaPadrao       = "https://nominatim.openstreetmap.org"
 	TimeoutAPIExternaPadrao   = 3 * time.Second
@@ -63,6 +77,19 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 		AgenteAPIExterna:   ler("EXTERNAL_API_USER_AGENT", AgentePadrao),
 		ChaveServico:       ler("SERVICE_KEY", ""),
 		ExigirAutenticacao: lerBool(ler("EXIGIR_AUTENTICACAO", "false")),
+
+		FilasAtivas:   lerBool(ler("FILAS_ATIVAS", "true")),
+		URLNATS:       ler("NATS_URL", ""),
+		StreamNATS:    ler("NATS_STREAM", StreamNATSPadrao),
+		SubjectNATS:   ler("NATS_SUBJECT", SubjectNATSPadrao),
+		ConsumerNATS:  ler("NATS_CONSUMER", ConsumerNATSPadrao),
+		DiretorioNATS: ler("NATS_STORE_DIR", DiretorioNATSPadrao),
+	}
+
+	if timeoutWorker, err := lerDuracao(ler("WORKER_SHUTDOWN_TIMEOUT", ""), TimeoutWorkerPadrao); err == nil {
+		cfg.TimeoutWorker = timeoutWorker
+	} else {
+		errs = append(errs, fmt.Errorf("WORKER_SHUTDOWN_TIMEOUT: %w", err))
 	}
 
 	if p, err := strconv.Atoi(cfg.Porta); err != nil || p < 1 || p > 65535 {

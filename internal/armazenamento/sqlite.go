@@ -67,6 +67,22 @@ CREATE TABLE IF NOT EXISTS alerta_instituicoes (
 	instituicao_id TEXT NOT NULL REFERENCES instituicoes(id),
 	PRIMARY KEY (alerta_id, instituicao_id)
 );
+
+CREATE TABLE IF NOT EXISTS tarefas_outbox (
+	id                   TEXT PRIMARY KEY,
+	alerta_id            TEXT NOT NULL REFERENCES alertas(id) ON DELETE CASCADE,
+	topico               TEXT NOT NULL,
+	payload_json         TEXT NOT NULL,
+	estado               TEXT NOT NULL CHECK (estado IN ('pendente', 'publicado', 'concluido', 'falha')),
+	tentativas           INTEGER NOT NULL DEFAULT 0,
+	max_tentativas       INTEGER NOT NULL DEFAULT 5,
+	proxima_tentativa_em TEXT NOT NULL,
+	erro_ultimo          TEXT NOT NULL DEFAULT '',
+	criado_em            TEXT NOT NULL,
+	atualizado_em        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_pendente ON tarefas_outbox (estado, proxima_tentativa_em);
+CREATE INDEX IF NOT EXISTS idx_outbox_alerta ON tarefas_outbox (alerta_id);
 `
 
 // SQLite é o repositório persistente usado pela aplicação.

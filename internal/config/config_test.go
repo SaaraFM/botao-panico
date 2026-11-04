@@ -31,6 +31,11 @@ func TestCarregar_Padroes(t *testing.T) {
 	assert.False(t, cfg.AutenticacaoAtiva())
 	assert.Empty(t, cfg.ChaveServico)
 	assert.False(t, cfg.ExigirAutenticacao)
+	assert.True(t, cfg.FilasAtivas)
+	assert.Equal(t, "ALERTAS", cfg.StreamNATS)
+	assert.Equal(t, "alertas.notificar", cfg.SubjectNATS)
+	assert.Equal(t, "worker-notificacoes", cfg.ConsumerNATS)
+	assert.Equal(t, 5*time.Second, cfg.TimeoutWorker)
 }
 
 func TestCarregar_Personalizado(t *testing.T) {
@@ -39,8 +44,10 @@ func TestCarregar_Personalizado(t *testing.T) {
 		"DATABASE_URL": "file:/tmp/x.db", "EXTERNAL_API_URL": "",
 		"EXTERNAL_API_TIMEOUT": "750ms", "NOTIFICATION_TIMEOUT": "2s",
 		"SERVICE_KEY": "segredo-super-seguro-com-mais-de-16-chars",
+		"FILAS_ATIVAS": "false",
 	}))
 	require.NoError(t, err)
+	assert.False(t, cfg.FilasAtivas)
 	assert.Equal(t, "9000", cfg.Porta)
 	assert.Equal(t, "9001", cfg.PortaGRPC)
 	assert.Equal(t, "127.0.0.1:9001", cfg.EnderecoGRPC())
@@ -76,6 +83,26 @@ func TestCarregar_SegurancaAutenticacao(t *testing.T) {
 	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SERVICE_KEY insegura")
+}
+
+func TestCarregar_FilasMensageria(t *testing.T) {
+	cfg, err := config.CarregarDe(fonte(map[string]string{
+		"FILAS_ATIVAS":            "true",
+		"NATS_URL":                "nats://127.0.0.1:4222",
+		"NATS_STREAM":             "STREAM_PRODUCAO",
+		"NATS_SUBJECT":            "eventos.alertas",
+		"NATS_CONSUMER":           "consumidor-alertas",
+		"NATS_STORE_DIR":          "data/nats-custom",
+		"WORKER_SHUTDOWN_TIMEOUT": "8s",
+	}))
+	require.NoError(t, err)
+	assert.True(t, cfg.FilasAtivas)
+	assert.Equal(t, "nats://127.0.0.1:4222", cfg.URLNATS)
+	assert.Equal(t, "STREAM_PRODUCAO", cfg.StreamNATS)
+	assert.Equal(t, "eventos.alertas", cfg.SubjectNATS)
+	assert.Equal(t, "consumidor-alertas", cfg.ConsumerNATS)
+	assert.Equal(t, "data/nats-custom", cfg.DiretorioNATS)
+	assert.Equal(t, 8*time.Second, cfg.TimeoutWorker)
 }
 
 func TestCarregar_Invalidos(t *testing.T) {

@@ -23,9 +23,12 @@ const (
 type StatusAlerta string
 
 const (
+	StatusCriado      StatusAlerta = "criado"
 	StatusRecebido    StatusAlerta = "recebido"
+	StatusProcessando StatusAlerta = "processando"
 	StatusNotificando StatusAlerta = "notificando"
 	StatusConcluido   StatusAlerta = "concluido"
+	StatusFalha       StatusAlerta = "falha"
 )
 
 // Localizacao representa a posição geográfica da usuária no momento do alerta.

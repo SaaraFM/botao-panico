@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/plataforma-mulher/botao-panico/internal/alerta"
 )
@@ -18,6 +19,7 @@ type Memoria struct {
 	alertas      map[string]alerta.Alerta
 	contatos     map[string][]alerta.ContatoEmergencia // chave: usuaria_id
 	instituicoes []alerta.InstituicaoApoio
+	outbox       map[string]alerta.TarefaOutbox
 }
 
 // NovaMemoria cria o repositório já populado com dados de exemplo.
@@ -26,6 +28,7 @@ func NovaMemoria() *Memoria {
 		alertas:      make(map[string]alerta.Alerta),
 		contatos:     map[string][]alerta.ContatoEmergencia{UsuariaDemo: contatosExemplo()},
 		instituicoes: instituicoesExemplo(),
+		outbox:       make(map[string]alerta.TarefaOutbox),
 	}
 }
 
@@ -101,4 +104,105 @@ func (m *Memoria) Instituicoes(_ context.Context) ([]alerta.InstituicaoApoio, er
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return append([]alerta.InstituicaoApoio{}, m.instituicoes...), nil
+}
+
+// SalvarAlertaComOutbox grava alerta e tarefa outbox de forma atômica em memória.
+func (m *Memoria) SalvarAlertaComOutbox(_ context.Context, a alerta.Alerta, t alerta.TarefaOutbox) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, existe := m.alertas[a.ID]; existe {
+		return fmt.Errorf("%w: alerta %s já existe", alerta.ErrEscrita, a.ID)
+	}
+	m.alertas[a.ID] = a.Copia()
+	m.outbox[t.ID] = t
+	return nil
+}
+
+// BuscarTarefasPendentes retorna tarefas pendentes em memória.
+func (m *Memoria) BuscarTarefasPendentes(_ context.Context, limite int) ([]alerta.TarefaOutbox, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	agora := time.Now()
+	var lista []alerta.TarefaOutbox
+	for _, t := range m.outbox {
+		if t.Estado == alerta.EstadoTarefaPendente && !t.ProximaTentativaEm.After(agora) {
+			lista = append(lista, t)
+			if limite > 0 && len(lista) >= limite {
+				break
+			}
+		}
+	}
+	return lista, nil
+}
+
+// MarcarTarefaPublicada atualiza o estado para 'publicado'.
+func (m *Memoria) MarcarTarefaPublicada(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, existe := m.outbox[id]
+	if !existe {
+		return alerta.ErrNaoEncontrado
+	}
+	t.Estado = alerta.EstadoTarefaPublicado
+	t.AtualizadoEm = time.Now()
+	m.outbox[id] = t
+	return nil
+}
+
+// MarcarTarefaConcluida atualiza o estado para 'concluido'.
+func (m *Memoria) MarcarTarefaConcluida(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, existe := m.outbox[id]
+	if !existe {
+		return alerta.ErrNaoEncontrado
+	}
+	t.Estado = alerta.EstadoTarefaConcluido
+	t.AtualizadoEm = time.Now()
+	m.outbox[id] = t
+	return nil
+}
+
+// IncrementarFalhaTarefa registra tentativa falha em memória.
+func (m *Memoria) IncrementarFalhaTarefa(_ context.Context, id string, erroMsg string, proximaTentativa time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, existe := m.outbox[id]
+	if !existe {
+		return alerta.ErrNaoEncontrado
+	}
+	t.Tentativas++
+	t.ErroUltimo = erroMsg
+	t.ProximaTentativaEm = proximaTentativa
+	t.AtualizadoEm = time.Now()
+	if t.Tentativas >= t.MaxTentativas {
+		t.Estado = alerta.EstadoTarefaFalha
+	} else {
+		t.Estado = alerta.EstadoTarefaPendente
+	}
+	m.outbox[id] = t
+	return nil
+}
+
+// BuscarTarefaPorID consulta uma tarefa em memória por ID.
+func (m *Memoria) BuscarTarefaPorID(_ context.Context, id string) (alerta.TarefaOutbox, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	t, existe := m.outbox[id]
+	if !existe {
+		return alerta.TarefaOutbox{}, alerta.ErrNaoEncontrado
+	}
+	return t, nil
+}
+
+// BuscarTarefaPorAlertaID consulta a tarefa outbox vinculada ao alerta em memória.
+func (m *Memoria) BuscarTarefaPorAlertaID(_ context.Context, alertaID string) (alerta.TarefaOutbox, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, t := range m.outbox {
+		if t.AlertaID == alertaID {
+			return t, nil
+		}
+	}
+	return alerta.TarefaOutbox{}, alerta.ErrNaoEncontrado
 }
