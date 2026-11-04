@@ -2,6 +2,7 @@ package armazenamento_test
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ func alertaExemplo(id string) alerta.Alerta {
 		ID: id, UsuariaID: armazenamento.UsuariaDemo, Nivel: alerta.RiscoAlto,
 		Mensagem: "estou sendo seguida", Local: alerta.Localizacao{Latitude: -28.9346, Longitude: -49.4957},
 		Status: alerta.StatusNotificando, CriadoEm: agora, AtualizadoEm: agora,
+		ChaveIdempotencia: "chave-" + id, HashRequisicao: "hash-" + id,
 		Notificacoes: []alerta.ResultadoEnvio{},
 		InstituicoesAlvo: []alerta.InstituicaoApoio{
 			{ID: "inst-1", Nome: "Polícia Militar — Araranguá", Tipo: "policia", Telefone: "190",
@@ -49,6 +51,82 @@ func TestSQLite_CriarEConsultarAlerta(t *testing.T) {
 	lido, err := repo.BuscarAlerta(ctx, "alerta-1")
 	require.NoError(t, err)
 	assert.Equal(t, original, lido)
+
+	// Consulta por chave de idempotência
+	porChave, err := repo.BuscarPorChaveIdempotencia(ctx, "chave-alerta-1")
+	require.NoError(t, err)
+	assert.Equal(t, original, porChave)
+}
+
+func TestSQLite_BuscarPorChaveInexistente(t *testing.T) {
+	ctx := context.Background()
+	repo := abrir(t, dsnTemporario(t))
+	t.Cleanup(func() { _ = repo.Fechar() })
+
+	_, err := repo.BuscarPorChaveIdempotencia(ctx, "nao-existe")
+	assert.ErrorIs(t, err, alerta.ErrNaoEncontrado)
+}
+
+func TestSQLite_MigracaoSeguraDeBancoLegado(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "legado.db")
+	dsn := "file:" + dbPath
+
+	// Cria intencionalmente uma tabela 'alertas' no esquema legado (sem chave_idempotencia e hash_requisicao)
+	db, err := sql.Open("sqlite", dsn)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		CREATE TABLE alertas (
+			id                  TEXT PRIMARY KEY,
+			usuaria_id          TEXT NOT NULL,
+			nivel               TEXT NOT NULL,
+			mensagem            TEXT NOT NULL DEFAULT '',
+			latitude            REAL NOT NULL,
+			longitude           REAL NOT NULL,
+			endereco_aproximado TEXT NOT NULL DEFAULT '',
+			silencioso          INTEGER NOT NULL DEFAULT 0,
+			status              TEXT NOT NULL,
+			criado_em           TEXT NOT NULL,
+			atualizado_em       TEXT NOT NULL
+		);
+		CREATE TABLE notificacoes (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			alerta_id  TEXT NOT NULL,
+			destino    TEXT NOT NULL,
+			canal      TEXT NOT NULL,
+			sucesso    INTEGER NOT NULL,
+			erro       TEXT NOT NULL DEFAULT '',
+			duracao_ms INTEGER NOT NULL,
+			enviado_em TEXT NOT NULL
+		);
+		CREATE TABLE alerta_instituicoes (
+			alerta_id      TEXT NOT NULL,
+			instituicao_id TEXT NOT NULL,
+			PRIMARY KEY (alerta_id, instituicao_id)
+		);
+		INSERT INTO alertas (id, usuaria_id, nivel, mensagem, latitude, longitude, status, criado_em, atualizado_em)
+		VALUES ('alerta-legado', 'usuaria-demo', 'alto', 'alerta antigo', -28.9, -49.4, 'concluido', '2026-09-01T10:00:00Z', '2026-09-01T10:00:00Z');
+	`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// Ao abrir com AbrirSQLite, a migração não-destrutiva deve adicionar as novas colunas preservando os dados
+	repo, err := armazenamento.AbrirSQLite(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Fechar() })
+
+	// O registro legado existente deve continuar legível
+	legado, err := repo.BuscarAlerta(ctx, "alerta-legado")
+	require.NoError(t, err)
+	assert.Equal(t, "alerta-legado", legado.ID)
+	assert.Empty(t, legado.ChaveIdempotencia)
+
+	// Novo alerta com chave de idempotência deve ser salvo normalmente
+	novo := alertaExemplo("alerta-novo")
+	require.NoError(t, repo.SalvarAlerta(ctx, novo))
+	lidoNovo, err := repo.BuscarPorChaveIdempotencia(ctx, "chave-alerta-novo")
+	require.NoError(t, err)
+	assert.Equal(t, novo.ID, lidoNovo.ID)
 }
 
 func TestSQLite_PersisteAposReabrir(t *testing.T) {

@@ -40,7 +40,7 @@ func executar() error {
 	ctx, parar := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer parar()
 
-	// 1. Persistência própria (SQLite; tabelas criadas automaticamente).
+	// 1. Persistência própria (SQLite; tabelas criadas automaticamente com migração idempotente).
 	ctxBanco, cancelar := context.WithTimeout(ctx, 10*time.Second)
 	repo, err := armazenamento.AbrirSQLite(ctxBanco, cfg.URLBanco)
 	cancelar()
@@ -62,11 +62,11 @@ func executar() error {
 		geo = cliente.NovoNominatim(cfg.URLAPIExterna, cfg.AgenteAPIExterna, cfg.TimeoutAPIExterna)
 	}
 
-	// 4. Regras de negócio e 5. camada HTTP.
+	// 4. Regras de negócio e 5. camada HTTP com proteção serviço-a-serviço.
 	servico := alerta.NovoServico(repo, despachante, geo, cfg.TimeoutNotificacoes)
 	servidor := &http.Server{
 		Addr:              ":" + cfg.Porta,
-		Handler:           httpapi.NovoServidor(servico).Rotas(),
+		Handler:           httpapi.NovoServidor(servico, cfg.ChaveServico).Rotas(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -74,8 +74,12 @@ func executar() error {
 
 	erroServidor := make(chan error, 1)
 	go func() {
-		slog.Info("Botão de Pânico ouvindo", "endereco", "http://localhost:"+cfg.Porta,
-			"banco", cfg.URLBanco, "geocodificacao", cfg.GeocodificacaoAtiva())
+		slog.Info("Botão de Pânico ouvindo",
+			"endereco", "http://localhost:"+cfg.Porta,
+			"banco", cfg.URLBanco,
+			"geocodificacao", cfg.GeocodificacaoAtiva(),
+			"autenticacao", cfg.AutenticacaoAtiva(),
+		)
 		erroServidor <- servidor.ListenAndServe()
 	}()
 

@@ -25,12 +25,16 @@ func TestCarregar_Padroes(t *testing.T) {
 	assert.Equal(t, 3*time.Second, cfg.TimeoutAPIExterna)
 	assert.Equal(t, 5*time.Second, cfg.TimeoutNotificacoes)
 	assert.True(t, cfg.GeocodificacaoAtiva())
+	assert.False(t, cfg.AutenticacaoAtiva())
+	assert.Empty(t, cfg.ChaveServico)
+	assert.False(t, cfg.ExigirAutenticacao)
 }
 
 func TestCarregar_Personalizado(t *testing.T) {
 	cfg, err := config.CarregarDe(fonte(map[string]string{
 		"PORT": "9000", "DATABASE_URL": "file:/tmp/x.db", "EXTERNAL_API_URL": "",
 		"EXTERNAL_API_TIMEOUT": "750ms", "NOTIFICATION_TIMEOUT": "2s",
+		"SERVICE_KEY": "segredo-super-seguro-com-mais-de-16-chars",
 	}))
 	require.NoError(t, err)
 	assert.Equal(t, "9000", cfg.Porta)
@@ -38,6 +42,24 @@ func TestCarregar_Personalizado(t *testing.T) {
 	assert.False(t, cfg.GeocodificacaoAtiva(), "URL vazia desativa a geocodificação")
 	assert.Equal(t, 750*time.Millisecond, cfg.TimeoutAPIExterna)
 	assert.Equal(t, 2*time.Second, cfg.TimeoutNotificacoes)
+	assert.True(t, cfg.AutenticacaoAtiva())
+	assert.Equal(t, "segredo-super-seguro-com-mais-de-16-chars", cfg.ChaveServico)
+}
+
+func TestCarregar_SegurancaAutenticacao(t *testing.T) {
+	// EXIGIR_AUTENTICACAO=true sem SERVICE_KEY deve falhar
+	_, err := config.CarregarDe(fonte(map[string]string{
+		"EXIGIR_AUTENTICACAO": "true",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "EXIGIR_AUTENTICACAO")
+
+	// SERVICE_KEY muito curta deve falhar
+	_, err = config.CarregarDe(fonte(map[string]string{
+		"SERVICE_KEY": "chave-curta",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SERVICE_KEY insegura")
 }
 
 func TestCarregar_Invalidos(t *testing.T) {

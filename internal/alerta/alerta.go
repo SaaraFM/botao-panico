@@ -2,7 +2,12 @@
 // da Plataforma da Mulher. Aqui ficam os tipos centrais (structs) e suas regras.
 package alerta
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"time"
+)
 
 // NivelRisco representa a gravidade da situação informada pela usuária.
 type NivelRisco string
@@ -58,13 +63,24 @@ type Destinatario struct {
 
 // PedidoAlerta é o payload recebido pela API quando a usuária aciona o botão de pânico.
 type PedidoAlerta struct {
-	UsuariaID  string      `json:"usuaria_id"`
-	Nivel      NivelRisco  `json:"nivel"`
-	Mensagem   string      `json:"mensagem"`
-	Local      Localizacao `json:"local"`
+	ChaveIdempotencia string      `json:"chave_idempotencia,omitempty"`
+	UsuariaID         string      `json:"usuaria_id"`
+	Nivel             NivelRisco  `json:"nivel"`
+	Mensagem          string      `json:"mensagem"`
+	Local             Localizacao `json:"local"`
 	// Silencioso registra uma preferência para a interface/aparelho. No serviço
 	// atual, não altera destinatários nem o despacho de notificações.
 	Silencioso bool `json:"silencioso"`
+}
+
+// HashConteudo gera um resumo criptográfico dos dados do pedido para garantir
+// que requisições repetidas com a mesma chave tenham exatamente o mesmo conteúdo.
+func (p PedidoAlerta) HashConteudo() string {
+	dados := fmt.Sprintf("%s|%s|%s|%.6f|%.6f|%t",
+		p.UsuariaID, p.Nivel, p.Mensagem,
+		p.Local.Latitude, p.Local.Longitude, p.Silencioso)
+	h := sha256.Sum256([]byte(dados))
+	return hex.EncodeToString(h[:])
 }
 
 // Alerta é o registro completo de um acionamento do botão de pânico.
@@ -73,18 +89,22 @@ type PedidoAlerta struct {
 // é complementar: vem da API externa de geocodificação e fica vazio se ela falhar.
 type Alerta struct {
 	ID                 string             `json:"id"`
+	ChaveIdempotencia  string             `json:"chave_idempotencia,omitempty"`
+	HashRequisicao     string             `json:"hash_requisicao,omitempty"`
 	UsuariaID          string             `json:"usuaria_id"`
 	Nivel              NivelRisco         `json:"nivel"`
 	Mensagem           string             `json:"mensagem"`
 	Local              Localizacao        `json:"local"`
 	EnderecoAproximado string             `json:"endereco_aproximado,omitempty"`
 	// Silencioso preserva a preferência recebida; não suprime notificações.
-	Silencioso         bool               `json:"silencioso"`
-	Status             StatusAlerta       `json:"status"`
-	CriadoEm           time.Time          `json:"criado_em"`
-	AtualizadoEm       time.Time          `json:"atualizado_em"`
-	Notificacoes       []ResultadoEnvio   `json:"notificacoes"`
-	InstituicoesAlvo   []InstituicaoApoio `json:"instituicoes_alvo,omitempty"`
+	Silencioso       bool               `json:"silencioso"`
+	Status           StatusAlerta       `json:"status"`
+	CriadoEm         time.Time          `json:"criado_em"`
+	AtualizadoEm     time.Time          `json:"atualizado_em"`
+	Notificacoes     []ResultadoEnvio   `json:"notificacoes"`
+	InstituicoesAlvo []InstituicaoApoio `json:"instituicoes_alvo,omitempty"`
+	// Replay indica se o alerta foi recuperado por idempotência sem novo processamento.
+	Replay bool `json:"-"`
 }
 
 // Copia devolve uma cópia profunda do alerta (slices inclusive), para que

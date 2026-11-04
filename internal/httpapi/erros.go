@@ -14,6 +14,8 @@ const (
 	CodigoJSONInvalido      = "JSON_INVALIDO"
 	CodigoCorpoGrande       = "CORPO_MUITO_GRANDE"
 	CodigoDadosInvalidos    = "DADOS_INVALIDOS"
+	CodigoNaoAutorizado     = "NAO_AUTORIZADO"
+	CodigoConflito          = "CONFLITO"
 	CodigoNaoEncontrado     = "NAO_ENCONTRADO"
 	CodigoBancoIndisponivel = "BANCO_INDISPONIVEL"
 	CodigoTempoEsgotado     = "TEMPO_ESGOTADO"
@@ -47,6 +49,8 @@ func traduzirErro(err error) *erroHTTP {
 		e := novoErro(http.StatusUnprocessableEntity, CodigoDadosInvalidos, "dados inválidos")
 		e.corpo.Campos = validacao.Campos
 		return e
+	case errors.Is(err, alerta.ErrConflitoIdempotencia):
+		return novoErro(http.StatusConflict, CodigoConflito, "chave de idempotência já utilizada com dados diferentes")
 	case errors.Is(err, alerta.ErrNaoEncontrado):
 		return novoErro(http.StatusNotFound, CodigoNaoEncontrado, "alerta não encontrado")
 

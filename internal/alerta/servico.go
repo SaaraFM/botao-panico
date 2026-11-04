@@ -3,8 +3,10 @@ package alerta
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -21,6 +23,7 @@ type RepositorioAlertas interface {
 	SalvarAlerta(ctx context.Context, a Alerta) error
 	AtualizarAlerta(ctx context.Context, a Alerta) error
 	BuscarAlerta(ctx context.Context, id string) (Alerta, error)
+	BuscarPorChaveIdempotencia(ctx context.Context, chave string) (Alerta, error)
 	ListarAlertas(ctx context.Context) ([]Alerta, error)
 }
 
@@ -41,18 +44,37 @@ type Geocodificador interface {
 }
 
 // Servico orquestra o fluxo completo do botão de pânico:
-// validar → registrar → notificar (+ geocodificar em paralelo) → atualizar.
+// validar → verificar idempotência → registrar → notificar (+ geocodificar em paralelo) → atualizar.
 type Servico struct {
 	repositorio      Repositorio
 	despachante      DespachanteNotificacao
 	geocodificador   Geocodificador // opcional: pode ser nil
 	timeoutPorAlerta time.Duration
+	bloqueiosChave   sync.Map // chaveIdempotencia -> *sync.Mutex (concorrência local)
 }
 
 // NovoServico monta o serviço com suas dependências (injeção de dependência).
 // geo pode ser nil quando a geocodificação estiver desativada.
 func NovoServico(repo Repositorio, desp DespachanteNotificacao, geo Geocodificador, timeout time.Duration) *Servico {
-	return &Servico{repositorio: repo, despachante: desp, geocodificador: geo, timeoutPorAlerta: timeout}
+	return &Servico{
+		repositorio:      repo,
+		despachante:      desp,
+		geocodificador:   geo,
+		timeoutPorAlerta: timeout,
+	}
+}
+
+// obterTrava garante exclusão mútua em nível de chave de idempotência para requisições concorrentes.
+func (s *Servico) obterTrava(chave string) func() {
+	if chave == "" {
+		return func() {}
+	}
+	val, _ := s.bloqueiosChave.LoadOrStore(chave, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	return func() {
+		mu.Unlock()
+	}
 }
 
 // Acionar processa um pedido de botão de pânico de ponta a ponta.
@@ -65,6 +87,26 @@ func (s *Servico) Acionar(ctx context.Context, pedido PedidoAlerta) (Alerta, err
 		return Alerta{}, err
 	}
 
+	// 1. Idempotência e Concorrência: se informada chave, sincroniza e verifica duplicidade
+	if pedido.ChaveIdempotencia != "" {
+		liberar := s.obterTrava(pedido.ChaveIdempotencia)
+		defer liberar()
+
+		existente, err := s.repositorio.BuscarPorChaveIdempotencia(ctx, pedido.ChaveIdempotencia)
+		if err == nil {
+			// Requisição repetida: se os dados diferem, é conflito (HTTP 409)
+			if existente.HashRequisicao != "" && existente.HashRequisicao != pedido.HashConteudo() {
+				return Alerta{}, ErrConflitoIdempotencia
+			}
+			// Se os dados são os mesmos, devolve o alerta original sem disparar notificações novamente
+			existente.Replay = true
+			return existente, nil
+		}
+		if !errors.Is(err, ErrNaoEncontrado) {
+			return Alerta{}, fmt.Errorf("verificar chave de idempotência: %w", err)
+		}
+	}
+
 	id, err := novoID()
 	if err != nil {
 		return Alerta{}, fmt.Errorf("gerar id do alerta: %w", err)
@@ -72,16 +114,18 @@ func (s *Servico) Acionar(ctx context.Context, pedido PedidoAlerta) (Alerta, err
 
 	agora := time.Now().UTC()
 	a := Alerta{
-		ID:           id,
-		UsuariaID:    pedido.UsuariaID,
-		Nivel:        pedido.Nivel,
-		Mensagem:     pedido.Mensagem,
-		Local:        pedido.Local,
-		Silencioso:   pedido.Silencioso,
-		Status:       StatusNotificando,
-		CriadoEm:     agora,
-		AtualizadoEm: agora,
-		Notificacoes: []ResultadoEnvio{},
+		ID:                id,
+		ChaveIdempotencia: pedido.ChaveIdempotencia,
+		HashRequisicao:    pedido.HashConteudo(),
+		UsuariaID:         pedido.UsuariaID,
+		Nivel:             pedido.Nivel,
+		Mensagem:          pedido.Mensagem,
+		Local:             pedido.Local,
+		Silencioso:        pedido.Silencioso,
+		Status:            StatusNotificando,
+		CriadoEm:          agora,
+		AtualizadoEm:      agora,
+		Notificacoes:      []ResultadoEnvio{},
 	}
 
 	destinatarios, instituicoes, err := s.montarDestinatarios(ctx, pedido)

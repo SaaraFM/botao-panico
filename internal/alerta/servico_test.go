@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,9 +23,11 @@ type despachanteFalso struct {
 	liberar       chan struct{} // se não for nil, bloqueia até ser fechado
 	iniciou       chan struct{}
 	umaVez        sync.Once
+	enviosTotais  int64
 }
 
 func (d *despachanteFalso) Despachar(_ context.Context, destinatarios []alerta.Destinatario, _ string) []alerta.ResultadoEnvio {
+	atomic.AddInt64(&d.enviosTotais, 1)
 	if d.iniciou != nil {
 		d.umaVez.Do(func() { close(d.iniciou) })
 	}
@@ -143,6 +146,96 @@ func TestAcionar_FalhaNaGeocodificacaoNaoImpedeAlerta(t *testing.T) {
 	assert.Equal(t, localValido, a.Local)
 }
 
+func TestAcionar_IdempotenciaMesmoConteudoRetornaOriginal(t *testing.T) {
+	repo := armazenamento.NovaMemoria()
+	desp := &despachanteFalso{}
+	servico := alerta.NovoServico(repo, desp, nil, 5*time.Second)
+
+	pedido := alerta.PedidoAlerta{
+		ChaveIdempotencia: "chave-teste-1234",
+		UsuariaID:         armazenamento.UsuariaDemo,
+		Nivel:             alerta.RiscoAlto,
+		Local:             localValido,
+		Mensagem:          "socorro teste",
+	}
+
+	primeiro, err := servico.Acionar(context.Background(), pedido)
+	require.NoError(t, err)
+	assert.False(t, primeiro.Replay)
+	assert.Equal(t, int64(1), atomic.LoadInt64(&desp.enviosTotais))
+
+	// Reenviar a mesma chave com exatamente o mesmo pedido:
+	segundo, err := servico.Acionar(context.Background(), pedido)
+	require.NoError(t, err)
+	assert.True(t, segundo.Replay)
+	assert.Equal(t, primeiro.ID, segundo.ID)
+	assert.Equal(t, primeiro.CriadoEm, segundo.CriadoEm)
+	// Notificações NÃO foram redespachadas:
+	assert.Equal(t, int64(1), atomic.LoadInt64(&desp.enviosTotais))
+}
+
+func TestAcionar_IdempotenciaConteudoDiferenteRetornaConflito(t *testing.T) {
+	repo := armazenamento.NovaMemoria()
+	desp := &despachanteFalso{}
+	servico := alerta.NovoServico(repo, desp, nil, 5*time.Second)
+
+	pedido1 := alerta.PedidoAlerta{
+		ChaveIdempotencia: "chave-conflito-123",
+		UsuariaID:         armazenamento.UsuariaDemo,
+		Nivel:             alerta.RiscoBaixo,
+		Local:             localValido,
+		Mensagem:          "mensagem original",
+	}
+
+	_, err := servico.Acionar(context.Background(), pedido1)
+	require.NoError(t, err)
+
+	pedido2 := alerta.PedidoAlerta{
+		ChaveIdempotencia: "chave-conflito-123",
+		UsuariaID:         armazenamento.UsuariaDemo,
+		Nivel:             alerta.RiscoCritico, // nível alterado!
+		Local:             localValido,
+		Mensagem:          "mensagem diferente",
+	}
+
+	_, err = servico.Acionar(context.Background(), pedido2)
+	require.ErrorIs(t, err, alerta.ErrConflitoIdempotencia)
+}
+
+func TestAcionar_IdempotenciaConcorrenteMesmaChave(t *testing.T) {
+	repo := armazenamento.NovaMemoria()
+	desp := &despachanteFalso{}
+	servico := alerta.NovoServico(repo, desp, nil, 5*time.Second)
+
+	pedido := alerta.PedidoAlerta{
+		ChaveIdempotencia: "chave-concorrente-abc",
+		UsuariaID:         armazenamento.UsuariaDemo,
+		Nivel:             alerta.RiscoAlto,
+		Local:             localValido,
+	}
+
+	var wg sync.WaitGroup
+	resultados := make([]alerta.Alerta, 10)
+	erros := make([]error, 10)
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			resultados[idx], erros[idx] = servico.Acionar(context.Background(), pedido)
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < 10; i++ {
+		assert.NoError(t, erros[i])
+		assert.Equal(t, resultados[0].ID, resultados[i].ID)
+	}
+
+	// O despachante deve ter sido acionado apenas UMA vez
+	assert.Equal(t, int64(1), atomic.LoadInt64(&desp.enviosTotais))
+}
+
 func TestAcionar_PropagaErrosDeInfraestrutura(t *testing.T) {
 	casos := []struct {
 		nome     string
@@ -163,11 +256,6 @@ func TestAcionar_PropagaErrosDeInfraestrutura(t *testing.T) {
 	}
 }
 
-// TestAcionar_LeituraConcorrenteDuranteProcessamento reproduz o cenário da
-// condição de corrida da versão anterior: enquanto um alerta está sendo
-// processado (notificações em andamento), outras goroutines leem o mesmo
-// alerta e a listagem. Rode com -race: qualquer compartilhamento indevido
-// de memória faz o teste falhar.
 func TestAcionar_LeituraConcorrenteDuranteProcessamento(t *testing.T) {
 	repo := armazenamento.NovaMemoria()
 	desp := &despachanteFalso{liberar: make(chan struct{}), iniciou: make(chan struct{})}

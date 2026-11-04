@@ -62,6 +62,21 @@ func (m *Memoria) BuscarAlerta(_ context.Context, id string) (alerta.Alerta, err
 	return a.Copia(), nil
 }
 
+// BuscarPorChaveIdempotencia devolve uma cópia do alerta que possui a chave ou ErrNaoEncontrado.
+func (m *Memoria) BuscarPorChaveIdempotencia(_ context.Context, chave string) (alerta.Alerta, error) {
+	if chave == "" {
+		return alerta.Alerta{}, alerta.ErrNaoEncontrado
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, a := range m.alertas {
+		if a.ChaveIdempotencia == chave {
+			return a.Copia(), nil
+		}
+	}
+	return alerta.Alerta{}, alerta.ErrNaoEncontrado
+}
+
 // ListarAlertas devolve cópias de todos os alertas, do mais recente ao mais antigo.
 func (m *Memoria) ListarAlertas(_ context.Context) ([]alerta.Alerta, error) {
 	m.mu.RLock()

@@ -9,6 +9,9 @@ var (
 	// ErrNaoEncontrado: o recurso pedido não existe (erro de negócio → 404).
 	ErrNaoEncontrado = errors.New("registro não encontrado")
 
+	// ErrConflitoIdempotencia: chave de idempotência já utilizada com dados diferentes (erro de negócio → 409).
+	ErrConflitoIdempotencia = errors.New("chave de idempotência já utilizada com dados diferentes")
+
 	// ErrBancoIndisponivel: não foi possível falar com o banco (infra → 503).
 	ErrBancoIndisponivel = errors.New("banco de dados indisponível")
 

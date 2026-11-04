@@ -19,16 +19,20 @@ type Config struct {
 	TimeoutAPIExterna   time.Duration // EXTERNAL_API_TIMEOUT
 	AgenteAPIExterna    string        // EXTERNAL_API_USER_AGENT
 	TimeoutNotificacoes time.Duration // NOTIFICATION_TIMEOUT
+	ChaveServico        string        // SERVICE_KEY (chave serviço-a-serviço)
+	ExigirAutenticacao  bool          // EXIGIR_AUTENTICACAO (falha se não houver SERVICE_KEY válida)
 }
 
 // Valores padrão para desenvolvimento local (sem nenhuma credencial).
 const (
 	PortaPadrao               = "8080"
+	PortaIntegracao           = "8081" // Porta recomendada para integração com Plataforma da Mulher
 	URLBancoPadrao            = "file:botao_panico.db"
 	URLAPIExternaPadrao       = "https://nominatim.openstreetmap.org"
 	TimeoutAPIExternaPadrao   = 3 * time.Second
 	AgentePadrao              = "botao-panico-plataforma-mulher/1.0 (trabalho academico CIT7219)"
 	TimeoutNotificacoesPadrao = 5 * time.Second
+	MinimoCaracteresChave     = 16
 )
 
 // Carregar lê as variáveis usando os.LookupEnv.
@@ -47,10 +51,12 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 
 	var errs []error
 	cfg := Config{
-		Porta:            ler("PORT", PortaPadrao),
-		URLBanco:         ler("DATABASE_URL", URLBancoPadrao),
-		URLAPIExterna:    ler("EXTERNAL_API_URL", URLAPIExternaPadrao),
-		AgenteAPIExterna: ler("EXTERNAL_API_USER_AGENT", AgentePadrao),
+		Porta:              ler("PORT", PortaPadrao),
+		URLBanco:           ler("DATABASE_URL", URLBancoPadrao),
+		URLAPIExterna:      ler("EXTERNAL_API_URL", URLAPIExternaPadrao),
+		AgenteAPIExterna:   ler("EXTERNAL_API_USER_AGENT", AgentePadrao),
+		ChaveServico:       ler("SERVICE_KEY", ""),
+		ExigirAutenticacao: lerBool(ler("EXIGIR_AUTENTICACAO", "false")),
 	}
 
 	if p, err := strconv.Atoi(cfg.Porta); err != nil || p < 1 || p > 65535 {
@@ -77,6 +83,16 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 		errs = append(errs, fmt.Errorf("NOTIFICATION_TIMEOUT: %w", err))
 	}
 
+	// Segurança: se a autenticação estiver ativada explicitamente ou se SERVICE_KEY for informada,
+	// valida para impedir que falhas de configuração exponham endpoints sensíveis por engano.
+	if cfg.ExigirAutenticacao || cfg.ChaveServico != "" {
+		if cfg.ChaveServico == "" {
+			errs = append(errs, errors.New("EXIGIR_AUTENTICACAO está ativa, mas SERVICE_KEY está vazia: o servidor não pode iniciar sem credencial válida"))
+		} else if len(cfg.ChaveServico) < MinimoCaracteresChave {
+			errs = append(errs, fmt.Errorf("SERVICE_KEY insegura: requer no mínimo %d caracteres (possui %d)", MinimoCaracteresChave, len(cfg.ChaveServico)))
+		}
+	}
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
@@ -86,6 +102,11 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 // GeocodificacaoAtiva indica se a API externa está configurada.
 func (c Config) GeocodificacaoAtiva() bool {
 	return c.URLAPIExterna != ""
+}
+
+// AutenticacaoAtiva indica se a autenticação serviço-a-serviço está configurada.
+func (c Config) AutenticacaoAtiva() bool {
+	return c.ChaveServico != ""
 }
 
 func lerDuracao(valor string, padrao time.Duration) (time.Duration, error) {
@@ -100,4 +121,9 @@ func lerDuracao(valor string, padrao time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("valor %q fora do intervalo (0, 1m]", valor)
 	}
 	return d, nil
+}
+
+func lerBool(valor string) bool {
+	b, _ := strconv.ParseBool(strings.TrimSpace(valor))
+	return b
 }

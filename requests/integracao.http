@@ -1,0 +1,102 @@
+# ==============================================================================
+# REQUISIÇÕES DE INTEGRAÇÃO — BOTÃO DE PÂNICO + PLATAFORMA DA MULHER
+# Porta de integração local: 8081
+# ==============================================================================
+
+@baseUrl = http://localhost:8081
+
+# Preencha a variável abaixo com a mesma chave definida em SERVICE_KEY no seu .env local:
+@serviceKey = DEFINA_SUA_CHAVE_DE_SERVICO_AQUI_MINIMO_16_CHARS
+
+# Identificador único de idempotência (exemplo UUID v4 para teste)
+@chaveIdempotencia = c3a4f89d-7b21-4f10-9b4e-28d157a912c0
+
+# ==============================================================================
+# 1. HEALTH CHECK (PÚBLICO)
+# ==============================================================================
+### 1. Verificar disponibilidade do serviço
+GET {{baseUrl}}/health
+Accept: application/json
+
+# ==============================================================================
+# 2. TESTES DE AUTENTICAÇÃO SERVIÇO-A-SERVIÇO
+# ==============================================================================
+
+### 2.1 Requisição sem autenticação em endpoint sensível (Esperado: HTTP 401)
+GET {{baseUrl}}/alertas
+Accept: application/json
+
+### 2.2 Requisição com token de serviço inválido (Esperado: HTTP 401)
+GET {{baseUrl}}/alertas
+Accept: application/json
+X-Service-Token: credencial-incorreta
+
+### 2.3 Requisição autenticada via X-Service-Token (Esperado: HTTP 200)
+GET {{baseUrl}}/alertas
+Accept: application/json
+X-Service-Token: {{serviceKey}}
+
+# ==============================================================================
+# 3. CRIAÇÃO DE ALERTA COM IDEMPOTÊNCIA
+# ==============================================================================
+
+### 3.1 Criar alerta com chave de idempotência (Primeiro envio: Esperado HTTP 201)
+# @name criarAlertaIntegracao
+POST {{baseUrl}}/alertas
+Content-Type: application/json
+Authorization: Bearer {{serviceKey}}
+X-Idempotency-Key: {{chaveIdempotencia}}
+
+{
+  "usuaria_id": "usuaria-demo",
+  "nivel": "alto",
+  "mensagem": "Acionamento simulado para teste de integração",
+  "local": {
+    "latitude": -28.9346,
+    "longitude": -49.4957
+  },
+  "silencioso": true
+}
+
+### 3.2 Repetição com a mesma chave e mesmo conteúdo (Esperado: HTTP 200 + Replay sem novas notificações)
+POST {{baseUrl}}/alertas
+Content-Type: application/json
+X-Service-Token: {{serviceKey}}
+X-Idempotency-Key: {{chaveIdempotencia}}
+
+{
+  "usuaria_id": "usuaria-demo",
+  "nivel": "alto",
+  "mensagem": "Acionamento simulado para teste de integração",
+  "local": {
+    "latitude": -28.9346,
+    "longitude": -49.4957
+  },
+  "silencioso": true
+}
+
+### 3.3 Repetição com a mesma chave, mas conteúdo diferente (Esperado: HTTP 409 Conflict)
+POST {{baseUrl}}/alertas
+Content-Type: application/json
+X-Service-Token: {{serviceKey}}
+X-Idempotency-Key: {{chaveIdempotencia}}
+
+{
+  "usuaria_id": "usuaria-demo",
+  "nivel": "critico",
+  "mensagem": "Conteúdo alterado com a mesma chave de idempotência",
+  "local": {
+    "latitude": -28.9346,
+    "longitude": -49.4957
+  },
+  "silencioso": false
+}
+
+# ==============================================================================
+# 4. CONSULTAR ALERTA POR ID
+# ==============================================================================
+
+### 4.1 Consultar alerta criado (Esperado: HTTP 200)
+GET {{baseUrl}}/alertas/{{criarAlertaIntegracao.response.body.$.id}}
+Accept: application/json
+Authorization: Bearer {{serviceKey}}

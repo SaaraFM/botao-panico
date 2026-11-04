@@ -20,6 +20,7 @@ import (
 )
 
 const pedidoValido = `{"usuaria_id":"usuaria-demo","nivel":"alto","mensagem":"socorro","local":{"latitude":-28.9346,"longitude":-49.4957}}`
+const chaveServicoTeste = "chave-super-secreta-para-testes-123"
 
 // notificadorInstantaneo evita a latência simulada nos testes da API.
 type notificadorInstantaneo struct{}
@@ -28,18 +29,23 @@ func (notificadorInstantaneo) Canal() string                                { re
 func (notificadorInstantaneo) Enviar(context.Context, string, string) error { return nil }
 
 // novoServidorReal monta a pilha completa com SQLite temporário.
-func novoServidorReal(t *testing.T) http.Handler {
+func novoServidorReal(t *testing.T, chaveServico ...string) http.Handler {
 	t.Helper()
 	repo, err := armazenamento.AbrirSQLite(context.Background(), "file:"+filepath.Join(t.TempDir(), "api.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = repo.Fechar() })
 	servico := alerta.NovoServico(repo, notificacao.NovoDespachante(notificadorInstantaneo{}), nil, time.Second)
-	return httpapi.NovoServidor(servico).Rotas()
+	return httpapi.NovoServidor(servico, chaveServico...).Rotas()
 }
 
-func requisitar(h http.Handler, metodo, rota, corpo string) *httptest.ResponseRecorder {
+func requisitar(h http.Handler, metodo, rota, corpo string, headers ...map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(metodo, rota, strings.NewReader(corpo))
 	req.Header.Set("Content-Type", "application/json")
+	if len(headers) > 0 {
+		for k, v := range headers[0] {
+			req.Header.Set(k, v)
+		}
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -75,6 +81,70 @@ func TestAPI_CriarConsultarEListar(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &lista))
 	require.Len(t, lista, 1)
 	assert.Equal(t, criado.ID, lista[0].ID)
+}
+
+func TestAPI_AutenticacaoServicoAServico(t *testing.T) {
+	h := novoServidorReal(t, chaveServicoTeste)
+
+	// Sem autenticação em endpoint sensível: 401
+	rec := requisitar(h, http.MethodPost, "/alertas", pedidoValido)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, httpapi.CodigoNaoAutorizado, decodificarErro(t, rec).Codigo)
+
+	rec = requisitar(h, http.MethodGet, "/alertas", "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	rec = requisitar(h, http.MethodGet, "/alertas/qualquer-id", "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// Health check e Instituições continuam públicos
+	assert.Equal(t, http.StatusOK, requisitar(h, http.MethodGet, "/health", "").Code)
+	assert.Equal(t, http.StatusOK, requisitar(h, http.MethodGet, "/instituicoes", "").Code)
+
+	// Token inválido: 401
+	rec = requisitar(h, http.MethodGet, "/alertas", "", map[string]string{
+		"X-Service-Token": "token-invalido",
+	})
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// Token válido via X-Service-Token: 200
+	rec = requisitar(h, http.MethodGet, "/alertas", "", map[string]string{
+		"X-Service-Token": chaveServicoTeste,
+	})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Token válido via Authorization: Bearer: 201 no POST
+	rec = requisitar(h, http.MethodPost, "/alertas", pedidoValido, map[string]string{
+		"Authorization": "Bearer " + chaveServicoTeste,
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code)
+}
+
+func TestAPI_IdempotenciaViaHeader(t *testing.T) {
+	h := novoServidorReal(t)
+	chaveIdempotencia := "req-idemp-uuid-12345"
+
+	headers := map[string]string{"X-Idempotency-Key": chaveIdempotencia}
+
+	// 1. Criação inicial: 201 Created
+	rec1 := requisitar(h, http.MethodPost, "/alertas", pedidoValido, headers)
+	require.Equal(t, http.StatusCreated, rec1.Code)
+	var a1 alerta.Alerta
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &a1))
+
+	// 2. Repetição idêntica: 200 OK com cabeçalho de replay
+	rec2 := requisitar(h, http.MethodPost, "/alertas", pedidoValido, headers)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	assert.Equal(t, "true", rec2.Header().Get("X-Idempotent-Replay"))
+	var a2 alerta.Alerta
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &a2))
+	assert.Equal(t, a1.ID, a2.ID)
+
+	// 3. Mesma chave com dados alterados: 409 Conflict
+	corpoAlterado := `{"usuaria_id":"usuaria-demo","nivel":"critico","mensagem":"mensagem alterada","local":{"latitude":-28.9346,"longitude":-49.4957}}`
+	rec3 := requisitar(h, http.MethodPost, "/alertas", corpoAlterado, headers)
+	require.Equal(t, http.StatusConflict, rec3.Code)
+	assert.Equal(t, httpapi.CodigoConflito, decodificarErro(t, rec3).Codigo)
 }
 
 func TestAPI_HealthEInstituicoes(t *testing.T) {

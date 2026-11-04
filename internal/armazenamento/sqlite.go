@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS alertas (
 	silencioso          INTEGER NOT NULL DEFAULT 0,
 	status              TEXT NOT NULL,
 	criado_em           TEXT NOT NULL,
-	atualizado_em       TEXT NOT NULL
+	atualizado_em       TEXT NOT NULL,
+	chave_idempotencia  TEXT NOT NULL DEFAULT '',
+	hash_requisicao     TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS notificacoes (
@@ -121,6 +123,12 @@ func (s *SQLite) migrar(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, esquema); err != nil {
 		return classificar(alerta.ErrEscrita, fmt.Errorf("criar esquema: %w", err))
 	}
+
+	// Migração segura para colunas e índice de idempotência em bancos SQLite existentes
+	if err := s.assegurarColunasIdempotencia(ctx, tx); err != nil {
+		return err
+	}
+
 	for _, i := range instituicoesExemplo() {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO instituicoes (id, nome, tipo, telefone, latitude, longitude) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -137,6 +145,52 @@ func (s *SQLite) migrar(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return classificar(alerta.ErrEscrita, err)
+	}
+	return nil
+}
+
+// assegurarColunasIdempotencia garante compatibilidade não-destrutiva com bancos legados.
+func (s *SQLite) assegurarColunasIdempotencia(ctx context.Context, tx *sql.Tx) error {
+	linhas, err := tx.QueryContext(ctx, `PRAGMA table_info(alertas)`)
+	if err != nil {
+		return classificar(alerta.ErrLeitura, err)
+	}
+	defer linhas.Close()
+
+	temChave := false
+	temHash := false
+	for linhas.Next() {
+		var cid int
+		var nome, tipo string
+		var notnull, pk int
+		var dfltValue any
+		if err := linhas.Scan(&cid, &nome, &tipo, &notnull, &dfltValue, &pk); err != nil {
+			return classificar(alerta.ErrLeitura, err)
+		}
+		if nome == "chave_idempotencia" {
+			temChave = true
+		}
+		if nome == "hash_requisicao" {
+			temHash = true
+		}
+	}
+	if err := linhas.Err(); err != nil {
+		return classificar(alerta.ErrLeitura, err)
+	}
+	_ = linhas.Close()
+
+	if !temChave {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE alertas ADD COLUMN chave_idempotencia TEXT NOT NULL DEFAULT ''`); err != nil {
+			return classificar(alerta.ErrEscrita, fmt.Errorf("adicionar chave_idempotencia: %w", err))
+		}
+	}
+	if !temHash {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE alertas ADD COLUMN hash_requisicao TEXT NOT NULL DEFAULT ''`); err != nil {
+			return classificar(alerta.ErrEscrita, fmt.Errorf("adicionar hash_requisicao: %w", err))
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_alertas_idempotencia ON alertas(chave_idempotencia) WHERE chave_idempotencia != ''`); err != nil {
+		return classificar(alerta.ErrEscrita, fmt.Errorf("criar índice de idempotência: %w", err))
 	}
 	return nil
 }
@@ -162,10 +216,12 @@ func (s *SQLite) gravar(ctx context.Context, a alerta.Alerta, atualizar bool) er
 	if atualizar {
 		res, err := tx.ExecContext(ctx, `
 			UPDATE alertas SET usuaria_id = ?, nivel = ?, mensagem = ?, latitude = ?, longitude = ?,
-				endereco_aproximado = ?, silencioso = ?, status = ?, criado_em = ?, atualizado_em = ?
+				endereco_aproximado = ?, silencioso = ?, status = ?, criado_em = ?, atualizado_em = ?,
+				chave_idempotencia = ?, hash_requisicao = ?
 			WHERE id = ?`,
 			a.UsuariaID, string(a.Nivel), a.Mensagem, a.Local.Latitude, a.Local.Longitude,
-			a.EnderecoAproximado, a.Silencioso, string(a.Status), formatarData(a.CriadoEm), formatarData(a.AtualizadoEm), a.ID)
+			a.EnderecoAproximado, a.Silencioso, string(a.Status), formatarData(a.CriadoEm), formatarData(a.AtualizadoEm),
+			a.ChaveIdempotencia, a.HashRequisicao, a.ID)
 		if err != nil {
 			return classificar(alerta.ErrEscrita, err)
 		}
@@ -184,10 +240,11 @@ func (s *SQLite) gravar(ctx context.Context, a alerta.Alerta, atualizar bool) er
 	} else {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO alertas (id, usuaria_id, nivel, mensagem, latitude, longitude,
-				endereco_aproximado, silencioso, status, criado_em, atualizado_em)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				endereco_aproximado, silencioso, status, criado_em, atualizado_em, chave_idempotencia, hash_requisicao)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			a.ID, a.UsuariaID, string(a.Nivel), a.Mensagem, a.Local.Latitude, a.Local.Longitude,
-			a.EnderecoAproximado, a.Silencioso, string(a.Status), formatarData(a.CriadoEm), formatarData(a.AtualizadoEm)); err != nil {
+			a.EnderecoAproximado, a.Silencioso, string(a.Status), formatarData(a.CriadoEm), formatarData(a.AtualizadoEm),
+			a.ChaveIdempotencia, a.HashRequisicao); err != nil {
 			return classificar(alerta.ErrEscrita, err)
 		}
 	}
@@ -216,6 +273,25 @@ func (s *SQLite) gravar(ctx context.Context, a alerta.Alerta, atualizar bool) er
 // BuscarAlerta devolve o alerta completo ou ErrNaoEncontrado.
 func (s *SQLite) BuscarAlerta(ctx context.Context, id string) (alerta.Alerta, error) {
 	linha := s.db.QueryRowContext(ctx, selecaoAlerta+` WHERE id = ?`, id)
+	a, err := lerAlerta(linha)
+	if errors.Is(err, sql.ErrNoRows) {
+		return alerta.Alerta{}, alerta.ErrNaoEncontrado
+	}
+	if err != nil {
+		return alerta.Alerta{}, classificar(alerta.ErrLeitura, err)
+	}
+	if err := s.carregarFilhos(ctx, &a); err != nil {
+		return alerta.Alerta{}, err
+	}
+	return a, nil
+}
+
+// BuscarPorChaveIdempotencia devolve o alerta registrado com a chave informada ou ErrNaoEncontrado.
+func (s *SQLite) BuscarPorChaveIdempotencia(ctx context.Context, chave string) (alerta.Alerta, error) {
+	if chave == "" {
+		return alerta.Alerta{}, alerta.ErrNaoEncontrado
+	}
+	linha := s.db.QueryRowContext(ctx, selecaoAlerta+` WHERE chave_idempotencia = ?`, chave)
 	a, err := lerAlerta(linha)
 	if errors.Is(err, sql.ErrNoRows) {
 		return alerta.Alerta{}, alerta.ErrNaoEncontrado
@@ -290,7 +366,7 @@ func (s *SQLite) Instituicoes(ctx context.Context) ([]alerta.InstituicaoApoio, e
 }
 
 const selecaoAlerta = `SELECT id, usuaria_id, nivel, mensagem, latitude, longitude,
-	endereco_aproximado, silencioso, status, criado_em, atualizado_em FROM alertas`
+	endereco_aproximado, silencioso, status, criado_em, atualizado_em, chave_idempotencia, hash_requisicao FROM alertas`
 
 // leitor é satisfeito por *sql.Row e *sql.Rows.
 type leitor interface {
@@ -302,13 +378,16 @@ func lerAlerta(l leitor) (alerta.Alerta, error) {
 		a                      alerta.Alerta
 		nivel, status          string
 		criadoEm, atualizadoEm string
+		chaveIdemp, hashReq    string
 	)
 	if err := l.Scan(&a.ID, &a.UsuariaID, &nivel, &a.Mensagem, &a.Local.Latitude, &a.Local.Longitude,
-		&a.EnderecoAproximado, &a.Silencioso, &status, &criadoEm, &atualizadoEm); err != nil {
+		&a.EnderecoAproximado, &a.Silencioso, &status, &criadoEm, &atualizadoEm, &chaveIdemp, &hashReq); err != nil {
 		return alerta.Alerta{}, err
 	}
 	a.Nivel = alerta.NivelRisco(nivel)
 	a.Status = alerta.StatusAlerta(status)
+	a.ChaveIdempotencia = chaveIdemp
+	a.HashRequisicao = hashReq
 
 	var err error
 	if a.CriadoEm, err = time.Parse(time.RFC3339Nano, criadoEm); err != nil {

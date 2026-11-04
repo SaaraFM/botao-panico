@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/plataforma-mulher/botao-panico/internal/alerta"
 )
@@ -27,21 +28,26 @@ type ServicoAlertas interface {
 
 // Servidor reúne as dependências dos handlers HTTP.
 type Servidor struct {
-	servico ServicoAlertas
+	servico      ServicoAlertas
+	chaveServico string
 }
 
-// NovoServidor cria o servidor HTTP com o serviço de alertas.
-func NovoServidor(servico ServicoAlertas) *Servidor {
-	return &Servidor{servico: servico}
+// NovoServidor cria o servidor HTTP com o serviço de alertas e chave de autenticação opcional.
+func NovoServidor(servico ServicoAlertas, chaveServico ...string) *Servidor {
+	var chave string
+	if len(chaveServico) > 0 {
+		chave = strings.TrimSpace(chaveServico[0])
+	}
+	return &Servidor{servico: servico, chaveServico: chave}
 }
 
 // Rotas registra todos os endpoints do microserviço.
 func (s *Servidor) Rotas() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.saude)
-	mux.HandleFunc("POST /alertas", s.criarAlerta)
-	mux.HandleFunc("GET /alertas", s.listarAlertas)
-	mux.HandleFunc("GET /alertas/{id}", s.buscarAlerta)
+	mux.HandleFunc("POST /alertas", s.autenticar(s.criarAlerta))
+	mux.HandleFunc("GET /alertas", s.autenticar(s.listarAlertas))
+	mux.HandleFunc("GET /alertas/{id}", s.autenticar(s.buscarAlerta))
 	mux.HandleFunc("GET /instituicoes", s.listarInstituicoes)
 	return mux
 }
@@ -59,9 +65,20 @@ func (s *Servidor) criarAlerta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Permite enviar a chave de idempotência tanto via cabeçalho HTTP quanto no payload
+	if chaveHeader := strings.TrimSpace(r.Header.Get("X-Idempotency-Key")); chaveHeader != "" && pedido.ChaveIdempotencia == "" {
+		pedido.ChaveIdempotencia = chaveHeader
+	}
+
 	a, err := s.servico.Acionar(r.Context(), pedido)
 	if err != nil {
 		responderFalha(w, err)
+		return
+	}
+
+	if a.Replay {
+		w.Header().Set("X-Idempotent-Replay", "true")
+		responderJSON(w, http.StatusOK, a)
 		return
 	}
 	responderJSON(w, http.StatusCreated, a)
