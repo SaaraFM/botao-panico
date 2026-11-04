@@ -66,10 +66,10 @@ func (s *SQLite) SalvarAlertaComOutbox(ctx context.Context, a alerta.Alerta, t a
 	_, err = tx.ExecContext(ctx, qOutbox,
 		t.ID, t.AlertaID, t.Topico, t.PayloadJSON, string(t.Estado),
 		t.Tentativas, t.MaxTentativas,
-		proximaTentativa.Format(time.RFC3339Nano),
+		formatarData(proximaTentativa),
 		t.ErroUltimo,
-		t.CriadoEm.Format(time.RFC3339Nano),
-		t.AtualizadoEm.Format(time.RFC3339Nano),
+		formatarData(t.CriadoEm),
+		formatarData(t.AtualizadoEm),
 	)
 	if err != nil {
 		return classificar(alerta.ErrEscrita, err)
@@ -95,7 +95,7 @@ func (s *SQLite) BuscarTarefasPendentes(ctx context.Context, limite int) ([]aler
 		limite = 50
 	}
 
-	rows, err := s.db.QueryContext(ctx, q, time.Now().Format(time.RFC3339Nano), limite)
+	rows, err := s.db.QueryContext(ctx, q, formatarData(time.Now()), limite)
 	if err != nil {
 		return nil, classificar(alerta.ErrLeitura, err)
 	}
@@ -129,7 +129,7 @@ func (s *SQLite) BuscarTarefasPendentes(ctx context.Context, limite int) ([]aler
 // MarcarTarefaPublicada atualiza o estado para 'publicado' após envio ao broker.
 func (s *SQLite) MarcarTarefaPublicada(ctx context.Context, id string) error {
 	const q = `UPDATE tarefas_outbox SET estado = 'publicado', atualizado_em = ? WHERE id = ?;`
-	res, err := s.db.ExecContext(ctx, q, time.Now().Format(time.RFC3339Nano), id)
+	res, err := s.db.ExecContext(ctx, q, formatarData(time.Now()), id)
 	if err != nil {
 		return classificar(alerta.ErrEscrita, err)
 	}
@@ -143,7 +143,7 @@ func (s *SQLite) MarcarTarefaPublicada(ctx context.Context, id string) error {
 // MarcarTarefaConcluida marca a tarefa como 'concluido' após o processamento bem-sucedido no worker.
 func (s *SQLite) MarcarTarefaConcluida(ctx context.Context, id string) error {
 	const q = `UPDATE tarefas_outbox SET estado = 'concluido', atualizado_em = ? WHERE id = ?;`
-	res, err := s.db.ExecContext(ctx, q, time.Now().Format(time.RFC3339Nano), id)
+	res, err := s.db.ExecContext(ctx, q, formatarData(time.Now()), id)
 	if err != nil {
 		return classificar(alerta.ErrEscrita, err)
 	}
@@ -167,8 +167,8 @@ func (s *SQLite) IncrementarFalhaTarefa(ctx context.Context, id string, erroMsg 
 
 	res, err := s.db.ExecContext(ctx, q,
 		erroMsg,
-		proximaTentativa.Format(time.RFC3339Nano),
-		time.Now().Format(time.RFC3339Nano),
+		formatarData(proximaTentativa),
+		formatarData(time.Now()),
 		id,
 	)
 	if err != nil {

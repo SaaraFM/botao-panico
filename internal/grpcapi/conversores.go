@@ -47,12 +47,14 @@ func paraProtoNivel(n alerta.NivelRisco) alertav1.NivelRisco {
 // paraProtoStatus traduz o status de domínio para Protocol Buffers.
 func paraProtoStatus(s alerta.StatusAlerta) alertav1.StatusAlerta {
 	switch s {
-	case alerta.StatusRecebido:
+	case alerta.StatusRecebido, alerta.StatusCriado:
 		return alertav1.StatusAlerta_CRIADO
-	case alerta.StatusNotificando:
+	case alerta.StatusNotificando, alerta.StatusProcessando:
 		return alertav1.StatusAlerta_PROCESSANDO
 	case alerta.StatusConcluido:
 		return alertav1.StatusAlerta_CONCLUIDO
+	case alerta.StatusFalha:
+		return alertav1.StatusAlerta_FALHA
 	default:
 		return alertav1.StatusAlerta_STATUS_UNSPECIFIED
 	}
