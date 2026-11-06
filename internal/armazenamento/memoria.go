@@ -20,6 +20,7 @@ type Memoria struct {
 	contatos     map[string][]alerta.ContatoEmergencia // chave: usuaria_id
 	instituicoes []alerta.InstituicaoApoio
 	outbox       map[string]alerta.TarefaOutbox
+	auditoria    []alerta.RegistroAuditoria
 }
 
 // NovaMemoria cria o repositório já populado com dados de exemplo.
@@ -29,6 +30,7 @@ func NovaMemoria() *Memoria {
 		contatos:     map[string][]alerta.ContatoEmergencia{UsuariaDemo: contatosExemplo()},
 		instituicoes: instituicoesExemplo(),
 		outbox:       make(map[string]alerta.TarefaOutbox),
+		auditoria:    make([]alerta.RegistroAuditoria, 0),
 	}
 }
 
@@ -205,4 +207,30 @@ func (m *Memoria) BuscarTarefaPorAlertaID(_ context.Context, alertaID string) (a
 		}
 	}
 	return alerta.TarefaOutbox{}, alerta.ErrNaoEncontrado
+}
+
+// SalvarAuditoria armazena um registro de auditoria em memória.
+func (m *Memoria) SalvarAuditoria(_ context.Context, reg alerta.RegistroAuditoria) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if reg.RecebidoEm.IsZero() {
+		reg.RecebidoEm = time.Now().UTC()
+	}
+	m.auditoria = append(m.auditoria, reg)
+	return nil
+}
+
+// ListarAuditoria retorna os eventos de auditoria armazenados.
+func (m *Memoria) ListarAuditoria(_ context.Context, limite int) ([]alerta.RegistroAuditoria, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if limite <= 0 || limite > len(m.auditoria) {
+		limite = len(m.auditoria)
+	}
+	resultado := make([]alerta.RegistroAuditoria, limite)
+	for i := 0; i < limite; i++ {
+		// Ordem decrescente (mais recentes primeiro)
+		resultado[i] = m.auditoria[len(m.auditoria)-1-i]
+	}
+	return resultado, nil
 }

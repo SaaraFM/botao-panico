@@ -3,7 +3,9 @@ package grpcapi
 import (
 	"context"
 	"crypto/subtle"
+	"log/slog"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -43,7 +45,11 @@ func validarCredencial(token, chaveEsperada string) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(chaveEsperada)) == 1
 }
 
-// AutenticarUnary intercepta chamadas unárias gRPC e valida a credencial serviço-a-serviço.
+// Interceptors gRPC funcionam como middlewares para chamadas de procedimentos remotos (RPC):
+// interceptam a requisição antes que ela chegue ao handler do serviço, permitindo autenticar
+// e medir a latência de forma centralizada.
+
+// AutenticarUnary intercepta chamadas unárias (requisição única -> resposta única) e valida a credencial S2S.
 func AutenticarUnary(chaveServico string) grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
@@ -89,5 +95,23 @@ func AutenticarStream(chaveServico string) grpc.StreamServerInterceptor {
 		}
 
 		return handler(srv, ss)
+	}
+}
+
+// LoggingUnary intercepta chamadas gRPC e emite logs estruturados com método, duração e status.
+func LoggingUnary() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		inicio := time.Now()
+		resp, err := handler(ctx, req)
+		duracao := time.Since(inicio).Milliseconds()
+		st, _ := status.FromError(err)
+
+		slog.Info("grpc_request",
+			"metodo", info.FullMethod,
+			"codigo", st.Code().String(),
+			"duracao_ms", duracao,
+			"sucesso", err == nil,
+		)
+		return resp, err
 	}
 }

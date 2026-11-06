@@ -48,9 +48,9 @@ func main() {
 	fmt.Println("\n1. Enviando solicitação CriarAlerta (Protocol Buffers binário)...")
 	chaveIdemp := fmt.Sprintf("demo-grpc-%d", time.Now().UnixNano())
 	reqCriar := &alertav1.CriarAlertaRequest{
-		UsuariaId:         "usuaria-academica-demo",
-		Nivel:             alertav1.NivelRisco_ALTO,
-		Mensagem:          "Demonstração CIT7219 - Acionamento de emergência gRPC",
+		UsuariaId: "usuaria-academica-demo",
+		Nivel:     alertav1.NivelRisco_ALTO,
+		Mensagem:  "Demonstração CIT7219 - Acionamento de emergência gRPC",
 		Localizacao: &alertav1.Coordenadas{
 			Latitude:  -28.9346,
 			Longitude: -49.4957,

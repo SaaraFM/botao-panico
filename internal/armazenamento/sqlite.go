@@ -83,6 +83,17 @@ CREATE TABLE IF NOT EXISTS tarefas_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_pendente ON tarefas_outbox (estado, proxima_tentativa_em);
 CREATE INDEX IF NOT EXISTS idx_outbox_alerta ON tarefas_outbox (alerta_id);
+
+CREATE TABLE IF NOT EXISTS auditoria_eventos (
+	id          TEXT PRIMARY KEY,
+	evento      TEXT NOT NULL,
+	versao      INTEGER NOT NULL,
+	id_evento   TEXT NOT NULL,
+	alerta_id   TEXT NOT NULL,
+	routing_key TEXT NOT NULL,
+	recebido_em TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auditoria_alerta ON auditoria_eventos(alerta_id);
 `
 
 // SQLite é o repositório persistente usado pela aplicação.
@@ -493,4 +504,45 @@ func classificar(tipo error, err error) error {
 		return fmt.Errorf("%w: %w", tipo, err)
 	}
 	return fmt.Errorf("%w: %v", tipo, err)
+}
+
+// SalvarAuditoria persiste um registro de evento consumido pelo worker de auditoria.
+func (s *SQLite) SalvarAuditoria(ctx context.Context, reg alerta.RegistroAuditoria) error {
+	const q = `INSERT INTO auditoria_eventos (id, evento, versao, id_evento, alerta_id, routing_key, recebido_em)
+	           VALUES (?, ?, ?, ?, ?, ?, ?);`
+	recebidoEm := reg.RecebidoEm
+	if recebidoEm.IsZero() {
+		recebidoEm = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, q, reg.ID, reg.Evento, reg.Versao, reg.IDEvento, reg.AlertaID, reg.RoutingKey, recebidoEm.Format(time.RFC3339Nano))
+	if err != nil {
+		return classificar(alerta.ErrEscrita, err)
+	}
+	return nil
+}
+
+// ListarAuditoria retorna os eventos de auditoria armazenados no SQLite.
+func (s *SQLite) ListarAuditoria(ctx context.Context, limite int) ([]alerta.RegistroAuditoria, error) {
+	if limite <= 0 {
+		limite = 50
+	}
+	const q = `SELECT id, evento, versao, id_evento, alerta_id, routing_key, recebido_em
+	           FROM auditoria_eventos ORDER BY recebido_em DESC LIMIT ?;`
+	rows, err := s.db.QueryContext(ctx, q, limite)
+	if err != nil {
+		return nil, classificar(alerta.ErrLeitura, err)
+	}
+	defer rows.Close()
+
+	var lista []alerta.RegistroAuditoria
+	for rows.Next() {
+		var r alerta.RegistroAuditoria
+		var dataStr string
+		if err := rows.Scan(&r.ID, &r.Evento, &r.Versao, &r.IDEvento, &r.AlertaID, &r.RoutingKey, &dataStr); err != nil {
+			return nil, classificar(alerta.ErrLeitura, err)
+		}
+		r.RecebidoEm, _ = time.Parse(time.RFC3339Nano, dataStr)
+		lista = append(lista, r)
+	}
+	return lista, rows.Err()
 }

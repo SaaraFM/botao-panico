@@ -1,0 +1,38 @@
+# Docker Compose para o microserviço Botão de Pânico (Semana 13 CIT7219)
+#
+# Sobe o broker RabbitMQ oficial com o painel de gerenciamento web (Management Plugin).
+#
+# Uso:
+#   docker compose up -d          # Inicia em segundo plano
+#   docker compose ps             # Verifica o estado e o healthcheck
+#   docker compose logs -f        # Acompanha os logs do RabbitMQ
+#   docker compose down           # Encerra o contêiner preservando o volume
+#   docker compose down -v        # Encerra e limpa todos os dados persistidos
+#
+# Painel Web: http://localhost:15672
+# Usuário padrão: guest
+# Senha padrão: guest
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: botao-panico-rabbitmq
+    restart: unless-stopped
+    ports:
+      # Portas restritas estritamente a 127.0.0.1 (localhost) por segurança
+      - "127.0.0.1:5672:5672"     # Porta AMQP 0-9-1 para conexão dos serviços Go
+      - "127.0.0.1:15672:15672"   # Painel web de administração e inspeção de filas
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  rabbitmq_data:
+    driver: local

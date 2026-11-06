@@ -14,7 +14,7 @@ const (
 	EstadoTarefaFalha     EstadoTarefa = "falha"
 )
 
-// TarefaOutbox representa uma mensagem persistida atômica no SQLite antes de ser enviada ao broker.
+// TarefaOutbox representa uma mensagem persistida atomicamente no SQLite antes de ser enviada ao broker.
 type TarefaOutbox struct {
 	ID                 string       `json:"id"`
 	AlertaID           string       `json:"alerta_id"`
@@ -29,12 +29,21 @@ type TarefaOutbox struct {
 	AtualizadoEm       time.Time    `json:"atualizado_em"`
 }
 
-// EventoAlertaCriado é o payload compacto trafegado na fila NATS JetStream.
-// Aplica minimização de dados (PII): coordenadas e mensagens completas ficam no SQLite.
-type EventoAlertaCriado struct {
+// Envelope segue a especificação padronizada de eventos (baseada em EVENTOS.md).
+// Garante interoperabilidade, versionamento e rastreabilidade nos brokers AMQP.
+type Envelope struct {
+	Evento    string      `json:"evento"`
+	Versao    int         `json:"versao"`
+	IDEvento  string      `json:"id_evento"`
+	EmitidoEm time.Time   `json:"emitido_em"`
+	Dados     DadosEvento `json:"dados"`
+}
+
+// DadosEvento contém apenas identificadores e dados mínimos necessários para processamento (Data Minimization).
+// Não expõe coordenadas sensíveis, dados pessoais ou mensagens de socorro na fila.
+type DadosEvento struct {
 	TarefaID  string `json:"tarefa_id"`
 	AlertaID  string `json:"alerta_id"`
 	UsuariaID string `json:"usuaria_id"`
 	Nivel     string `json:"nivel"`
-	CriadoEm  string `json:"criado_em"`
 }

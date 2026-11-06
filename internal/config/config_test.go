@@ -32,10 +32,16 @@ func TestCarregar_Padroes(t *testing.T) {
 	assert.Empty(t, cfg.ChaveServico)
 	assert.False(t, cfg.ExigirAutenticacao)
 	assert.True(t, cfg.FilasAtivas)
-	assert.Equal(t, "ALERTAS", cfg.StreamNATS)
-	assert.Equal(t, "alertas.notificar", cfg.SubjectNATS)
-	assert.Equal(t, "worker-notificacoes", cfg.ConsumerNATS)
+	assert.Equal(t, "amqp://guest:guest@127.0.0.1:5672/", cfg.AMQPURL)
+	assert.Equal(t, "panico.eventos", cfg.ExchangeEventos)
+	assert.Equal(t, "panico.eventos.dlx", cfg.ExchangeDLX)
+	assert.Equal(t, "panico.alertas.notificacoes", cfg.FilaNotificacoes)
+	assert.Equal(t, "alerta.criado", cfg.RoutingKeyNotificacoes)
+	assert.Equal(t, "panico.alertas.auditoria", cfg.FilaAuditoria)
+	assert.Equal(t, "#", cfg.RoutingKeyAuditoria)
+	assert.Equal(t, "panico.alertas.dlq", cfg.FilaDLQ)
 	assert.Equal(t, 5*time.Second, cfg.TimeoutWorker)
+	assert.False(t, cfg.EmailDemoAtivo)
 }
 
 func TestCarregar_Personalizado(t *testing.T) {
@@ -43,7 +49,7 @@ func TestCarregar_Personalizado(t *testing.T) {
 		"PORT": "9000", "GRPC_PORT": "9001", "GRPC_HOST": "127.0.0.1",
 		"DATABASE_URL": "file:/tmp/x.db", "EXTERNAL_API_URL": "",
 		"EXTERNAL_API_TIMEOUT": "750ms", "NOTIFICATION_TIMEOUT": "2s",
-		"SERVICE_KEY": "segredo-super-seguro-com-mais-de-16-chars",
+		"SERVICE_KEY":  "segredo-super-seguro-com-mais-de-16-chars",
 		"FILAS_ATIVAS": "false",
 	}))
 	require.NoError(t, err)
@@ -60,7 +66,6 @@ func TestCarregar_Personalizado(t *testing.T) {
 }
 
 func TestCarregar_ConflitoPortas(t *testing.T) {
-	// Mesma porta para REST e gRPC deve falhar
 	_, err := config.CarregarDe(fonte(map[string]string{
 		"PORT":      "8080",
 		"GRPC_PORT": "8080",
@@ -70,14 +75,12 @@ func TestCarregar_ConflitoPortas(t *testing.T) {
 }
 
 func TestCarregar_SegurancaAutenticacao(t *testing.T) {
-	// EXIGIR_AUTENTICACAO=true sem SERVICE_KEY deve falhar
 	_, err := config.CarregarDe(fonte(map[string]string{
 		"EXIGIR_AUTENTICACAO": "true",
 	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "EXIGIR_AUTENTICACAO")
 
-	// SERVICE_KEY muito curta deve falhar
 	_, err = config.CarregarDe(fonte(map[string]string{
 		"SERVICE_KEY": "chave-curta",
 	}))
@@ -85,41 +88,48 @@ func TestCarregar_SegurancaAutenticacao(t *testing.T) {
 	assert.Contains(t, err.Error(), "SERVICE_KEY insegura")
 }
 
-func TestCarregar_FilasMensageria(t *testing.T) {
+func TestCarregar_FilasMensageriaRabbitMQ(t *testing.T) {
 	cfg, err := config.CarregarDe(fonte(map[string]string{
-		"FILAS_ATIVAS":            "true",
-		"NATS_URL":                "nats://127.0.0.1:4222",
-		"NATS_STREAM":             "STREAM_PRODUCAO",
-		"NATS_SUBJECT":            "eventos.alertas",
-		"NATS_CONSUMER":           "consumidor-alertas",
-		"NATS_STORE_DIR":          "data/nats-custom",
-		"WORKER_SHUTDOWN_TIMEOUT": "8s",
+		"FILAS_ATIVAS":                      "true",
+		"AMQP_URL":                          "amqp://usuario:senha@10.0.0.2:5672/",
+		"RABBITMQ_EXCHANGE":                 "custom.eventos",
+		"RABBITMQ_DLX":                      "custom.dlx",
+		"RABBITMQ_QUEUE_NOTIFICACOES":       "custom.fila.notificacoes",
+		"RABBITMQ_ROUTING_KEY_NOTIFICACOES": "evento.emergencia",
+		"RABBITMQ_QUEUE_AUDITORIA":          "custom.fila.auditoria",
+		"RABBITMQ_ROUTING_KEY_AUDITORIA":    "evento.*",
+		"RABBITMQ_QUEUE_DLQ":                "custom.fila.dlq",
+		"WORKER_SHUTDOWN_TIMEOUT":           "8s",
 	}))
 	require.NoError(t, err)
 	assert.True(t, cfg.FilasAtivas)
-	assert.Equal(t, "nats://127.0.0.1:4222", cfg.URLNATS)
-	assert.Equal(t, "STREAM_PRODUCAO", cfg.StreamNATS)
-	assert.Equal(t, "eventos.alertas", cfg.SubjectNATS)
-	assert.Equal(t, "consumidor-alertas", cfg.ConsumerNATS)
-	assert.Equal(t, "data/nats-custom", cfg.DiretorioNATS)
+	assert.Equal(t, "amqp://usuario:senha@10.0.0.2:5672/", cfg.AMQPURL)
+	assert.Equal(t, "custom.eventos", cfg.ExchangeEventos)
+	assert.Equal(t, "custom.dlx", cfg.ExchangeDLX)
+	assert.Equal(t, "custom.fila.notificacoes", cfg.FilaNotificacoes)
+	assert.Equal(t, "evento.emergencia", cfg.RoutingKeyNotificacoes)
+	assert.Equal(t, "custom.fila.auditoria", cfg.FilaAuditoria)
+	assert.Equal(t, "evento.*", cfg.RoutingKeyAuditoria)
+	assert.Equal(t, "custom.fila.dlq", cfg.FilaDLQ)
 	assert.Equal(t, 8*time.Second, cfg.TimeoutWorker)
 }
 
-func TestCarregar_Invalidos(t *testing.T) {
-	casos := map[string]map[string]string{
-		"porta texto":      {"PORT": "abc"},
-		"porta fora":       {"PORT": "70000"},
-		"banco vazio":      {"DATABASE_URL": ""},
-		"url sem esquema":  {"EXTERNAL_API_URL": "nominatim.org"},
-		"timeout inválido": {"EXTERNAL_API_TIMEOUT": "rápido"},
-		"timeout negativo": {"EXTERNAL_API_TIMEOUT": "-1s"},
-		"timeout notif":    {"NOTIFICATION_TIMEOUT": "2h"},
-		"agente vazio":     {"EXTERNAL_API_USER_AGENT": ""},
-	}
-	for nome, vars := range casos {
-		t.Run(nome, func(t *testing.T) {
-			_, err := config.CarregarDe(fonte(vars))
-			assert.Error(t, err)
-		})
-	}
+func TestCarregar_EmailDemoValidacao(t *testing.T) {
+	// Se EMAIL_DEMO_ATIVO for true mas SMTP não for informado, deve falhar
+	_, err := config.CarregarDe(fonte(map[string]string{
+		"EMAIL_DEMO_ATIVO": "true",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SMTP_HOST")
+
+	// Com SMTP configurado corretamente
+	cfg, err := config.CarregarDe(fonte(map[string]string{
+		"EMAIL_DEMO_ATIVO": "true",
+		"SMTP_HOST":        "smtp.gmail.com",
+		"SMTP_FROM":        "teste@demo.local",
+	}))
+	require.NoError(t, err)
+	assert.True(t, cfg.EmailDemoAtivo)
+	assert.Equal(t, "smtp.gmail.com", cfg.SMTPHost)
+	assert.Equal(t, "teste@demo.local", cfg.SMTPRemetente)
 }

@@ -91,14 +91,14 @@ func (p PedidoAlerta) HashConteudo() string {
 // Local (latitude/longitude) é sempre a informação principal. EnderecoAproximado
 // é complementar: vem da API externa de geocodificação e fica vazio se ela falhar.
 type Alerta struct {
-	ID                 string             `json:"id"`
-	ChaveIdempotencia  string             `json:"chave_idempotencia,omitempty"`
-	HashRequisicao     string             `json:"hash_requisicao,omitempty"`
-	UsuariaID          string             `json:"usuaria_id"`
-	Nivel              NivelRisco         `json:"nivel"`
-	Mensagem           string             `json:"mensagem"`
-	Local              Localizacao        `json:"local"`
-	EnderecoAproximado string             `json:"endereco_aproximado,omitempty"`
+	ID                 string      `json:"id"`
+	ChaveIdempotencia  string      `json:"chave_idempotencia,omitempty"`
+	HashRequisicao     string      `json:"hash_requisicao,omitempty"`
+	UsuariaID          string      `json:"usuaria_id"`
+	Nivel              NivelRisco  `json:"nivel"`
+	Mensagem           string      `json:"mensagem"`
+	Local              Localizacao `json:"local"`
+	EnderecoAproximado string      `json:"endereco_aproximado,omitempty"`
 	// Silencioso preserva a preferência recebida; não suprime notificações.
 	Silencioso       bool               `json:"silencioso"`
 	Status           StatusAlerta       `json:"status"`
@@ -134,4 +134,15 @@ type ResultadoEnvio struct {
 	Erro      string `json:"erro,omitempty"`
 	DuracaoMs int64  `json:"duracao_ms"`
 	EnviadoEm string `json:"enviado_em"`
+}
+
+// RegistroAuditoria documenta de forma imutável a recepção de eventos para fins de auditoria e compliance.
+type RegistroAuditoria struct {
+	ID         string    `json:"id"`
+	Evento     string    `json:"evento"`
+	Versao     int       `json:"versao"`
+	IDEvento   string    `json:"id_evento"`
+	AlertaID   string    `json:"alerta_id"`
+	RoutingKey string    `json:"routing_key"`
+	RecebidoEm time.Time `json:"recebido_em"`
 }

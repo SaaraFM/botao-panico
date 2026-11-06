@@ -30,3 +30,6 @@ coverage
 # Dados locais NATS JetStream
 /data/
 data/
+
+# Documentos e materiais de estudo locais
+docs/

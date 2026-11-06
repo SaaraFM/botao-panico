@@ -41,15 +41,15 @@ func NovoServidor(servico ServicoAlertas, chaveServico ...string) *Servidor {
 	return &Servidor{servico: servico, chaveServico: chave}
 }
 
-// Rotas registra todos os endpoints do microserviço.
-func (s *Servidor) Rotas() *http.ServeMux {
+// Rotas registra todos os endpoints do microserviço com observabilidade estruturada e CORS.
+func (s *Servidor) Rotas() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.saude)
 	mux.HandleFunc("POST /alertas", s.autenticar(s.criarAlerta))
 	mux.HandleFunc("GET /alertas", s.autenticar(s.listarAlertas))
 	mux.HandleFunc("GET /alertas/{id}", s.autenticar(s.buscarAlerta))
 	mux.HandleFunc("GET /instituicoes", s.listarInstituicoes)
-	return mux
+	return LoggingMiddleware(corsMiddleware(mux))
 }
 
 // saude é o health check do serviço.

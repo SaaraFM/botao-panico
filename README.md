@@ -1,203 +1,97 @@
-# Botão de Pânico — Microserviço da Plataforma da Mulher
+# Botão de Pânico — Microserviço em Go
 
-Trabalho da disciplina **Tópicos Especiais em Tecnologias Digitais (CIT7219)**.
+Protótipo de microserviço em **Go** desenvolvido para o módulo de contingência da **Plataforma da Mulher** (TCC — Rede de apoio à mulher em Araranguá/SC), alinhado aos conteúdos práticos da disciplina **Tópicos Especiais em Tecnologias Digitais (CIT7219)**.
 
-Microserviço em **Go** que implementa o botão de pânico da Plataforma da Mulher
-(rede de apoio e segurança de mulheres em Araranguá/SC). Quando a usuária aciona
-o botão, o serviço persiste o alerta no SQLite próprio e processa, através de mensageria assíncrona,
-as notificações aos contatos de emergência e — em situações de risco alto ou crítico —
-à rede institucional de proteção (Polícia Militar, Delegacia da Mulher, CRAS e SAMU).
-
-O serviço expõe duas interfaces de comunicação simultâneas e integradas sobre a mesma camada de domínio:
-1. **API REST (HTTP/JSON)** na porta `8080` (ou `8081` para integração local), consumida pela Supabase Edge Function da Plataforma da Mulher.
-2. **API gRPC (HTTP/2 + Protocol Buffers binário)** na porta `50051`, voltada para comunicação de alta performance entre microserviços e integração institucional segura.
-3. **Mensageria Assíncrona e Transactional Outbox (NATS JetStream)**: processamento desacoplado de notificações simuladas com persistência atômica, retentativas exponenciais e confirmação explícita (Ack).
+O serviço recebe acionamentos de socorro, persiste os dados localmente com garantia transacional (**Transactional Outbox**) no **SQLite** e publica eventos assíncronos no broker **RabbitMQ (AMQP 0-9-1)**, distribuindo tarefas no padrão **Publish/Subscribe com dois consumidores independentes** e tratamento de falhas em **Dead-Letter Queue (DLQ)**.
 
 ---
 
-## Como rodar
+## Tecnologias
 
-Requisito: Go 1.24 ou superior. Não precisa de compilador C, nem de Docker ou servidor de mensageria externo instalado (possui NATS JetStream e SQLite embutidos).
+- **Linguagem Go (1.24+)**: desenvolvida com a biblioteca padrão (`net/http`, `log/slog`, `sync`, `context`).
+- **Comunicação REST**: API HTTP/JSON para integração com frontends e Edge Functions.
+- **gRPC e Protocol Buffers**: interface binária tipada definida em `proto/v1/alerta.proto`.
+- **SQLite (`modernc.org/sqlite`)**: banco relacional em Go puro (sem dependência de CGO), com migrações automáticas.
+- **RabbitMQ (`github.com/rabbitmq/amqp091-go`)**: broker AMQP com Publisher Confirms, Topic Exchange e DLQ.
+- **Docker Compose**: orquestração local do RabbitMQ (`rabbitmq:3-management`).
 
+---
+
+## Como Funciona
+
+1. **Recepção e Idempotência:** A requisição chega via `POST /alertas`. Quando a autenticação serviço-a-serviço está configurada (`EXIGIR_AUTENTICACAO=true`), o serviço valida o cabeçalho `X-Service-Token` (nos testes locais padrão, essa validação fica desativada). O serviço calcula o hash SHA-256 da carga para evitar disparos duplicados (`X-Idempotency-Key`).
+2. **Transactional Outbox:** O alerta (status inicial `"processando"`) e a tarefa de mensageria são gravados na mesma transação atômica do SQLite, reduzindo significativamente o risco de perda de eventos caso o broker ou a rede oscilem.
+3. **Resposta Imediata:** A API responde com código `201 Created` em poucos milissegundos, liberando a interface do usuário.
+4. **Publicação Confiável:** O componente em segundo plano `OutboxRelay` lê as tarefas pendentes e as publica na exchange topic `panico.eventos` com confirmação de entrega (**Publisher Confirms**).
+5. **Publish/Subscribe com Dois Consumidores:**
+   - **Consumidor A (Notificações):** escuta `alerta.criado`, simula o despacho para contatos e instituições, atualiza o status para `"concluido"` no SQLite e emite **ACK manual**.
+   - **Consumidor B (Auditoria):** escuta o tópico curinga `#`, registra logs estruturados e arquiva um registro independente de auditoria na tabela `auditoria_eventos`.
+6. **Dead-Letter Queue (DLQ):** Mensagens corrompidas ou que excedam o limite de retentativas recebem **NACK sem requeue** e são encaminhadas automaticamente à fila `panico.alertas.dlq`.
+
+---
+
+## Como Executar Localmente
+
+### Pré-requisitos
+- Go 1.24 ou superior instalado.
+- Docker Desktop em execução.
+
+### 1. Iniciar o RabbitMQ
+Na raiz do repositório, inicie o broker:
+```bash
+docker compose up -d
+```
+O painel administrativo estará acessível em `http://localhost:15672` (usuário: `guest`, senha: `guest`).
+
+### 2. Iniciar a API em Go
 ```bash
 go run ./cmd/api
 ```
+A API iniciará na porta padrão `8080` (REST) e `50051` (gRPC).
+*(Opcional: defina a variável `PORT=8081` caso a porta 8080 já esteja em uso por outro serviço local).*
 
-O serviço inicializa simultaneamente:
-- **REST**: `http://localhost:8080`
-- **gRPC**: `127.0.0.1:50051` (restrito a localhost por segurança)
-- **NATS JetStream**: Servidor embutido restrito a `127.0.0.1:4222` com persistência em disco (`data/jetstream`).
-- **Banco de dados**: SQLite próprio criado automaticamente com migração idempotente: `botao_panico.db`.
+### 3. Teste Rápido com Dados Fictícios
+Em outro terminal, envie um acionamento simulado:
 
-### Variáveis de ambiente
-
-| Variável | Padrão | Descrição |
-| --- | --- | --- |
-| `PORT` | `8080` | Porta HTTP REST (use `8081` para integração com Plataforma da Mulher) |
-| `GRPC_PORT` | `50051` | Porta do servidor gRPC |
-| `GRPC_HOST` | `127.0.0.1` | Host de escuta gRPC (padrão seguro restrito a localhost) |
-| `SERVICE_KEY` | *(vazio)* | Chave secreta serviço-a-serviço (mínimo 16 caracteres) |
-| `EXIGIR_AUTENTICACAO` | `false` | Se `true`, falha a inicialização caso `SERVICE_KEY` esteja ausente |
-| `DATABASE_URL` | `file:botao_panico.db` | DSN do SQLite próprio do serviço |
-| `EXTERNAL_API_URL` | `https://nominatim.openstreetmap.org` | API de geocodificação (vazio desativa) |
-| `EXTERNAL_API_TIMEOUT` | `3s` | Timeout de cada chamada externa |
-| `EXTERNAL_API_USER_AGENT` | identificação do trabalho | Exigido pela política do Nominatim |
-| `NOTIFICATION_TIMEOUT` | `5s` | Prazo para concluir as notificações |
-| `FILAS_ATIVAS` | `true` | Ativa mensageria NATS JetStream e Outbox assíncrono |
-| `NATS_URL` | *(vazio)* | URL do NATS broker externo (vazio roda JetStream embutido) |
-| `NATS_STREAM` | `ALERTAS` | Nome da Stream persistente do JetStream |
-| `NATS_SUBJECT` | `alertas.notificar` | Subject de publicação e roteamento das tarefas |
-| `NATS_CONSUMER` | `worker-notificacoes` | Nome do consumidor durável no JetStream |
-| `NATS_STORE_DIR` | `data/jetstream` | Diretório de armazenamento de logs de mensagem no disco |
-| `WORKER_SHUTDOWN_TIMEOUT` | `5s` | Prazo máximo de drenagem dos workers no encerramento |
-
-A configuração é validada estritamente na inicialização (portas, URLs, durações e conflito entre portas).
-
----
-
-## 1. Comunicação via REST (HTTP/JSON)
-
-### Acionando o botão de pânico via curl
-
+**Linux / macOS / Git Bash (curl):**
 ```bash
-curl -X POST http://localhost:8080/alertas \
+curl -i -X POST http://localhost:8080/alertas \
   -H "Content-Type: application/json" \
-  -H "X-Service-Token: sua-chave-secreta-se-configurada" \
-  -d '{"usuaria_id":"usuaria-demo","nivel":"alto","mensagem":"estou sendo seguida","local":{"latitude":-28.9346,"longitude":-49.4957}}'
+  -H "X-Idempotency-Key: teste-demo-001" \
+  -d '{"usuaria_id":"demo-01","nivel":"alto","mensagem":"Teste academico","local":{"latitude":-28.9346,"longitude":-49.4957}}'
 ```
 
-### Endpoints REST
+**Windows (PowerShell):**
+```powershell
+$headers = @{ "Content-Type" = "application/json"; "X-Idempotency-Key" = "teste-demo-001" }
+$corpo = @{ usuaria_id = "demo-01"; nivel = "alto"; mensagem = "Teste academico"; local = @{ latitude = -28.9346; longitude = -49.4957 } } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:8080/alertas" -Method POST -Headers $headers -Body $corpo | ConvertTo-Json
+```
 
-| Método | Rota | Sucesso | Erros possíveis |
-| --- | --- | --- | --- |
-| GET | `/health` | 200 | — |
-| POST | `/alertas` | 201 (ou 200 Replay) | 400, 401, 409, 413, 422, 500, 503 |
-| GET | `/alertas` | 200 | 401, 500, 503 |
-| GET | `/alertas/{id}` | 200 | 401, 404, 500, 503 |
-| GET | `/instituicoes` | 200 | 500, 503 |
-
-Formato padrão de erro: `{"erro": "mensagem", "codigo": "CODIGO"}` (+ `campos` na validação).
-Códigos: `JSON_INVALIDO`, `CORPO_MUITO_GRANDE`, `DADOS_INVALIDOS`, `NAO_AUTORIZADO`, `CONFLITO_IDEMPOTENCIA`, `NAO_ENCONTRADO`, `BANCO_INDISPONIVEL`, `TEMPO_ESGOTADO`, `ERRO_INTERNO`.
-
----
-
-## 2. Comunicação via gRPC e Protocol Buffers (CIT7219 — Semanas 09 e 11)
-
-A API gRPC implementa o contrato definido em `proto/v1/alerta.proto` (pacote versionado `alerta.v1`), gerando serialização binária compacta com verificação estrita de schema.
-
-### Versões das Ferramentas e Dependências
-- **Compilador Protoc**: `libprotoc 36.2`
-- **Plugin Go Protoc (`protoc-gen-go`)**: `v1.36.12`
-- **Plugin Go gRPC (`protoc-gen-go-grpc`)**: `v1.6.2`
-- **Módulo gRPC (`google.golang.org/grpc`)**: `v1.85.0`
-- **Módulo Protobuf (`google.golang.org/protobuf`)**: `v1.36.12`
-
-### Métodos gRPC Disponíveis
-
-| Método RPC | Requisição | Resposta | Descrição |
-| --- | --- | --- | --- |
-| `CriarAlerta` | `CriarAlertaRequest` | `CriarAlertaResponse` | Registra alerta no SQLite com suporte a mensageria assíncrona e idempotência (`replay: true`). |
-| `BuscarAlerta` | `BuscarAlertaRequest` | `BuscarAlertaResponse` | Consulta os dados de um alerta por ID. Retorna `NotFound` se inexistente. |
-| `ListarAlertas` | `ListarAlertasRequest` | `ListarAlertasResponse` | **Segurança de Privacidade**: Exige `usuaria_id` no payload. Rejeita listagens globais indiscriminadas (`InvalidArgument`). |
-| `ListarInstituicoes` | `ListarInstituicoesRequest` | `ListarInstituicoesResponse` | Retorna as instituições da rede de apoio de Araranguá/SC. |
-
-### Como Executar o Cliente gRPC de Demonstração
-
+Para demonstrar a comunicação binária via gRPC:
 ```bash
-# 1. Com o servidor rodando em outro terminal:
-go run ./cmd/api
-
-# 2. Em um novo terminal, execute o cliente de demonstração:
 go run ./cmd/grpc-client
 ```
 
----
-
-## 3. Mensageria Assíncrona e Filas com NATS JetStream (CIT7219 — Semana 12)
-
-Para desacoplar a resposta imediata da requisição (`POST /alertas`) do processamento e despacho das notificações simuladas, o sistema implementa os padrões assíncronos fundamentais da Semana 12:
-
-### Padrão Transactional Outbox
-1. **Atomicidade no SQLite**: O registro do alerta na tabela `alertas` e a gravação do evento na tabela `tarefas_outbox` ocorrem rigorosamente na mesma transação SQLite (`BeginTx -> Commit`). Se o broker de mensagens estiver temporariamente fora do ar, o alerta nunca perde sua tarefa associada.
-2. **Outbox Relay (Publisher)**: Uma goroutine em segundo plano monitora `tarefas_outbox` por gatilhos imediatos (`chan struct{}`) e varredura periódica configurável. Ao localizar tarefas pendentes, publica no NATS JetStream injetando o cabeçalho `Nats-Msg-Id` para deduplicação automática no broker.
-3. **Stream Persistente**: A Stream `ALERTAS` armazena mensagens com persistência em disco (`Storage: FileStorage`), retenção `LimitsPolicy` e janela de deduplicação nativa de 5 minutos.
-
-### Consumidor Durável e Pool de Workers
-1. **Queue Subscription**: O consumidor (`ConsumidorNotificacoes`) assina a fila usando `QueueSubscribeSync` durável (`worker-notificacoes`), permitindo balanceamento automático de carga entre múltiplos workers concorrentes.
-2. **Idempotência no Consumidor**: Antes de simular envios, o worker adquire trava por ID de alerta e verifica o status no repositório. Caso o alerta já tenha sido concluído (ex.: reentrega por timeout da rede), o worker confirma com `Ack()` sem reenviar notificações.
-3. **Confirmação Explícita (Ack/Nak)**: O `Ack()` só é transmitido ao broker JetStream após a atualização atômica de `tarefas_outbox` e do alerta no SQLite. Se ocorrer erro transiente, envia `NakWithDelay()` com backoff exponencial.
-4. **Desligamento Gracioso (Graceful Shutdown)**: O consumidor implementa `Drain()` e encerramento sincronizado via `sync.WaitGroup` e prazos de deadline (`WORKER_SHUTDOWN_TIMEOUT`).
-
----
-
-## 4. Banco de dados (SQLite próprio)
-
-Driver `modernc.org/sqlite` (Go puro). Tabelas criadas automaticamente com
-`CREATE TABLE IF NOT EXISTS` (idempotente) em `internal/armazenamento/sqlite.go`:
-- `alertas`: Registro histórico de acionamentos de pânico.
-- `tarefas_outbox`: Tabela de mensageria assíncrona (Transactional Outbox).
-- `notificacoes`: Log de notificações simuladas enviadas.
-- `alerta_instituicoes`: Associação com a rede de apoio de Araranguá.
-- `contatos_emergencia` e `instituicoes`: Cadastros de apoio e emergência.
-
----
-
-## 5. Como rodar os testes
-
-Todos os testes podem ser executados com:
-
+Para encerrar o RabbitMQ preservando os dados persistidos:
 ```bash
-# Análise estática de código
-go vet ./...
-
-# Testes unitários e de integração (REST + gRPC + Mensageria NATS + SQLite)
-go test -v ./...
-
-# Detecção rigorosa de condições de corrida em goroutines concorrentes
-go test -race ./...
-
-# Relatório de cobertura de código
-go test -cover ./...
+docker compose down
 ```
 
 ---
 
-## 6. Estrutura em camadas
+## Funcionalidades Principais
 
-```
-cmd/api/main.go           → inicialização REST, gRPC, NATS JetStream, Outbox Relay e Workers
-cmd/grpc-client/main.go   → cliente gRPC de demonstração acadêmica
-proto/v1/alerta.proto     → contrato Protocol Buffers versionado (alerta.v1)
-gen/alerta/v1/            → stubs Go gerados pelo protoc (pb.go e grpc.pb.go)
-internal/config/          → variáveis de ambiente (REST, gRPC, NATS) + validação estrita
-internal/alerta/          → entidades, regras de negócio, Transactional Outbox e idempotência SHA-256
-internal/fila/            → NATS JetStream (embutido/externo), Outbox Relay e Consumidor Durável
-internal/grpcapi/         → adaptador gRPC, conversão de DTOs e interceptors S2S
-internal/httpapi/         → adaptador REST HTTP/JSON e middleware S2S
-internal/armazenamento/   → SQLite com idempotência e gravação atômica Alerta + Outbox
-internal/cliente/         → client HTTP da API externa de geocodificação (Nominatim)
-internal/notificacao/     → despacho simulado de SMS e E-mail com concorrência paralela
-```
+- **Idempotência Garantida:** Reenvios com a mesma chave devolvem o alerta original (`replay: true`) sem duplicar registros ou notificações.
+- **Desacoplamento Assíncrono:** Notificações são processadas em segundo plano via workers com controle de fluxo (`QoS = 1`).
+- **Resiliência a Falhas:** Mensagens pendentes no SQLite são automaticamente retransmitidas com backoff exponencial caso o RabbitMQ fique temporariamente inacessível.
+- **Registro de Auditoria:** Consumidor independente mantém um registro separado de todos os eventos recebidos na tabela de auditoria.
+- **Observabilidade Estruturada:** Logs padronizados em JSON emitidos via `log/slog` contendo métricas de duração, rota, status e identificadores de correlação, sem exposição de credenciais ou dados sensíveis.
 
 ---
 
-## 7. Onde cada conteúdo da disciplina aparece
+## Limitações e Escopo
 
-| Conteúdo da disciplina                      | Onde está no código |
-| ------------------------------------------- | ------------------- |
-| Structs, arrays, slices e maps              | `internal/alerta/alerta.go`, `internal/alerta/outbox.go`, `internal/armazenamento/` |
-| Ponteiros                                   | `*PedidoAlerta`, `*SQLite`, `*Servico`, `*GerenciadorNATS` (alertas trafegam por valor para evitar race condition) |
-| Tratamento de erros e códigos gRPC          | `internal/alerta/erros.go`, `internal/grpcapi/conversores.go` (`codes.InvalidArgument`, `codes.AlreadyExists`, etc.) |
-| Interfaces                                  | `Notificador`, `Repositorio`, `RepositorioOutbox`, `Geocodificador`, `alertav1.AlertasServiceServer` |
-| Pacotes e arquitetura limpa em camadas      | `internal/...` (domínio isolado consumido por REST, gRPC e Mensageria) |
-| Protocol Buffers e Contratos IDL            | `proto/v1/alerta.proto`, geração em `gen/alerta/v1/` |
-| Comunicação RPC e gRPC                      | `internal/grpcapi/servidor.go`, `cmd/grpc-client/main.go` |
-| Interceptors gRPC (Unary e Streaming)       | `internal/grpcapi/interceptors.go` (autenticação S2S via metadados) |
-| Deadlines e Cancelamento distribuído        | `context.Context` com `context.WithDeadline` e `context.WithCancel` em REST, gRPC e Workers |
-| Filas de Mensagens e Brokers Persistentes   | `internal/fila/nats.go`, Stream JetStream com retenção persistente e `Duplicates` window |
-| Padrão Transactional Outbox                 | `internal/alerta/outbox.go`, `internal/armazenamento/outbox.go` (`SalvarAlertaComOutbox` em transação SQLite) |
-| Outbox Relay e Publicação At-Least-Once     | `internal/fila/outbox_relay.go` com publicação confirmada (`Nats-Msg-Id`) e backoff exponencial |
-| Consumidor Durável e Confirmação Explícita  | `internal/fila/consumidor.go` com `QueueSubscribeSync`, `Ack()`, `NakWithDelay()` e idempotência |
-| Concorrência (goroutines e canais/select)   | `internal/notificacao/despachante.go`, loops do Relay e Workers no `cmd/api/main.go` |
-| sync: WaitGroup, Mutex e sync.Map           | `ConsumidorNotificacoes.wg`, `OutboxRelay.wg`, `Servico.bloqueiosProcessamento`, `bloqueiosChave` |
-| Testes com testing, testify e mocks         | `internal/fila/fila_test.go` (12 cenários de mensageria), `internal/grpcapi/servidor_test.go`, etc. |
+- **Finalidade Acadêmica:** Projeto experimental desenvolvido para fins didáticos e demonstração de contingência; **não substitui os canais oficiais de socorro de emergência (190 e 180)**.
+- **Notificações Simuladas:** O despacho de mensagens (SMS/e-mail) é executado em modo simulado local por padrão; nenhum serviço público ou contato de emergência real é acionado.
+- **Integração de Frontend:** O microserviço é independente; a integração ponta a ponta com a interface visual da Plataforma da Mulher permanece em evolução contínua.

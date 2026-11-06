@@ -1,9 +1,12 @@
 // Botão de Pânico — microserviço da Plataforma da Mulher.
 //
-// Recebe o acionamento do botão de pânico pela usuária, grava o alerta no
-// banco SQLite próprio e notifica, em paralelo, seus contatos de emergência e
-// — em risco alto/crítico — a rede de proteção de Araranguá/SC. Em paralelo,
-// consulta a API Nominatim para registrar o endereço aproximado do alerta.
+// Recebe o acionamento do botão de pânico pela usuária, grava o alerta e a tarefa
+// na mesma transação SQLite (Transactional Outbox) e publica eventos no RabbitMQ (AMQP 0-9-1).
+// Dois consumidores independentes processam o mesmo evento em paralelo:
+//   - Consumidor A: processa notificações simuladas e atualiza o status para concluído.
+//   - Consumidor B: audita todos os eventos na fila panico.alertas.auditoria (binding #).
+//
+// Mensagens inválidas são automaticamente encaminhadas à Dead-Letter Queue (DLQ).
 package main
 
 import (
@@ -30,6 +33,14 @@ import (
 )
 
 func main() {
+	// Requisito 8 (Observabilidade): Configura o logger padrão da biblioteca oficial (log/slog)
+	// para emitir logs estritamente no formato JSON estruturado na saída padrão (stdout).
+	// Isso permite que coletores de logs e o terminal exibam chaves e valores padronizados
+	// (ex: time, level, msg, rota, alerta_id, duracao_ms) sem ferramentas pesadas como Grafana.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
 	if err := executar(); err != nil {
 		slog.Error("microserviço encerrado com erro", "erro", err)
 		os.Exit(1)
@@ -42,13 +53,22 @@ func executar() error {
 		return err
 	}
 
+	// Graceful Shutdown: captura sinais do sistema operacional (Ctrl+C / SIGINT e SIGTERM)
+	// criando um context.Context que é cancelado de forma ordenada ao receber o encerramento.
 	ctx, parar := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer parar()
 
-	// 1. Persistência própria (SQLite; tabelas criadas automaticamente com migração idempotente).
-	ctxBanco, cancelar := context.WithTimeout(ctx, 10*time.Second)
+	slog.Info("iniciando microserviço do botão de pânico",
+		"porta_rest", cfg.Porta,
+		"porta_grpc", cfg.PortaGRPC,
+		"filas_ativas", cfg.FilasAtivas,
+		"banco", cfg.URLBanco,
+	)
+
+	// 1. Persistência própria (SQLite; migração idempotente com Transactional Outbox e Auditoria).
+	ctxBanco, cancelarBanco := context.WithTimeout(ctx, 10*time.Second)
 	repo, err := armazenamento.AbrirSQLite(ctxBanco, cfg.URLBanco)
-	cancelar()
+	cancelarBanco()
 	if err != nil {
 		return err
 	}
@@ -70,52 +90,90 @@ func executar() error {
 	// 4. Regras de negócio compartilhadas entre REST e gRPC.
 	servico := alerta.NovoServico(repo, despachante, geo, cfg.TimeoutNotificacoes)
 
-	// 5. Mensageria NATS JetStream e Transactional Outbox (Semana 12 CIT7219)
-	var gerenciadorNATS *fila.GerenciadorNATS
-	var relayOutbox *fila.OutboxRelay
-	var workerNotificacoes *fila.ConsumidorNotificacoes
-
-	if cfg.FilasAtivas {
-		var errNATS error
-		gerenciadorNATS, errNATS = fila.NovoGerenciadorNATS(fila.OpcoesNATS{
-			URL:       cfg.URLNATS,
-			Stream:    cfg.StreamNATS,
-			Subject:   cfg.SubjectNATS,
-			Consumer:  cfg.ConsumerNATS,
-			Diretorio: cfg.DiretorioNATS,
+	// 5. E-mail demonstrativo acadêmico (FASE 6 - restrito e desativado por padrão)
+	var emailDemo *notificacao.EmailDemoNotificador
+	if cfg.EmailDemoAtivo {
+		emailDemo = notificacao.NovoEmailDemoNotificador(notificacao.ConfigEmailDemo{
+			Ativo:     true,
+			Host:      cfg.SMTPHost,
+			Porta:     cfg.SMTPPorta,
+			Usuario:   cfg.SMTPUsuario,
+			Senha:     cfg.SMTPSenha,
+			Remetente: cfg.SMTPRemetente,
 		})
-		if errNATS != nil {
-			return fmt.Errorf("inicializar nats jetstream: %w", errNATS)
-		}
-
-		relayOutbox = fila.NovoOutboxRelay(repo, gerenciadorNATS.JS, cfg.SubjectNATS, 200*time.Millisecond)
-		relayOutbox.Iniciar()
-
-		workerNotificacoes = fila.NovoConsumidorNotificacoes(
-			gerenciadorNATS.JS,
-			servico,
-			repo,
-			fila.OpcoesConsumidor{
-				Stream:     cfg.StreamNATS,
-				Subject:    cfg.SubjectNATS,
-				Consumer:   cfg.ConsumerNATS,
-				GrupoFila:  "workers-notificacoes",
-				NumWorkers: 3,
-			},
-		)
-		if err := workerNotificacoes.Iniciar(); err != nil {
-			return fmt.Errorf("iniciar worker de notificações: %w", err)
-		}
-
-		servico.AtivarModoAssincrono(relayOutbox.NotificarNovoAlerta)
-		slog.Info("Processamento assíncrono NATS JetStream ativo",
-			"stream", cfg.StreamNATS,
-			"subject", cfg.SubjectNATS,
-			"consumer", cfg.ConsumerNATS,
+		slog.Info("e-mail demonstrativo real ATIVADO (restrito a "+config.EmailAutorizadoDemo+")",
+			"destinatario_autorizado", config.EmailAutorizadoDemo,
+			"smtp_host", cfg.SMTPHost,
 		)
 	}
 
-	// 6. Camada HTTP REST (portas e endpoints para frontend e Edge Function).
+	// 6. Mensageria RabbitMQ AMQP 0-9-1 (Semana 13 CIT7219)
+	var gerRabbitMQ *fila.GerenciadorRabbitMQ
+	var relayOutbox *fila.OutboxRelay
+	var consNotificacoes *fila.ConsumidorNotificacoes
+	var consAuditoria *fila.ConsumidorAuditoria
+
+	if cfg.FilasAtivas {
+		var errRabbit error
+		gerRabbitMQ, errRabbit = fila.NovoGerenciadorRabbitMQ(fila.OpcoesRabbitMQ{
+			URL:                    cfg.AMQPURL,
+			ExchangeEventos:        cfg.ExchangeEventos,
+			ExchangeDLX:            cfg.ExchangeDLX,
+			FilaNotificacoes:       cfg.FilaNotificacoes,
+			RoutingKeyNotificacoes: cfg.RoutingKeyNotificacoes,
+			FilaAuditoria:          cfg.FilaAuditoria,
+			RoutingKeyAuditoria:    cfg.RoutingKeyAuditoria,
+			FilaDLQ:                cfg.FilaDLQ,
+		})
+		if errRabbit != nil {
+			return fmt.Errorf("inicializar infraestrutura rabbitmq: %w", errRabbit)
+		}
+
+		relayOutbox = fila.NovoOutboxRelay(repo, gerRabbitMQ, cfg.RoutingKeyNotificacoes, 200*time.Millisecond)
+		relayOutbox.Iniciar()
+
+		// Consumidor A: Notificações
+		consNotificacoes, err = fila.NovoConsumidorNotificacoes(
+			gerRabbitMQ.Conexao(),
+			servico,
+			repo,
+			fila.OpcoesConsumidorNotificacoes{
+				Fila:      cfg.FilaNotificacoes,
+				EmailDemo: emailDemo,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("inicializar consumidor de notificações: %w", err)
+		}
+		if err := consNotificacoes.Iniciar(); err != nil {
+			return fmt.Errorf("iniciar consumo de notificações: %w", err)
+		}
+
+		// Consumidor B: Auditoria Independente (binding #)
+		consAuditoria, err = fila.NovoConsumidorAuditoria(
+			gerRabbitMQ.Conexao(),
+			servico,
+			fila.OpcoesConsumidorAuditoria{
+				Fila: cfg.FilaAuditoria,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("inicializar consumidor de auditoria: %w", err)
+		}
+		if err := consAuditoria.Iniciar(); err != nil {
+			return fmt.Errorf("iniciar consumo de auditoria: %w", err)
+		}
+
+		servico.AtivarModoAssincrono(relayOutbox.NotificarNovoAlerta)
+		slog.Info("processamento assíncrono RabbitMQ ativo (Pub/Sub com dois consumidores independentes)",
+			"exchange", cfg.ExchangeEventos,
+			"fila_notificacoes", cfg.FilaNotificacoes,
+			"fila_auditoria", cfg.FilaAuditoria,
+			"fila_dlq", cfg.FilaDLQ,
+		)
+	}
+
+	// 7. Camada HTTP REST (portas e endpoints para frontend e Edge Function).
 	servidorHTTP := &http.Server{
 		Addr:              ":" + cfg.Porta,
 		Handler:           httpapi.NovoServidor(servico, cfg.ChaveServico).Rotas(),
@@ -124,14 +182,19 @@ func executar() error {
 		WriteTimeout:      30 * time.Second,
 	}
 
-	// 7. Camada gRPC (comunicação entre microserviços com Protocol Buffers).
-	var grpcOpts []grpc.ServerOption
+	// 8. Camada gRPC com Protocol Buffers e observabilidade via interceptor.
+	var unaryInterceptors []grpc.UnaryServerInterceptor
+	unaryInterceptors = append(unaryInterceptors, grpcapi.LoggingUnary())
 	if cfg.AutenticacaoAtiva() {
-		grpcOpts = append(grpcOpts,
-			grpc.UnaryInterceptor(grpcapi.AutenticarUnary(cfg.ChaveServico)),
-			grpc.StreamInterceptor(grpcapi.AutenticarStream(cfg.ChaveServico)),
-		)
+		unaryInterceptors = append(unaryInterceptors, grpcapi.AutenticarUnary(cfg.ChaveServico))
 	}
+
+	var grpcOpts []grpc.ServerOption
+	grpcOpts = append(grpcOpts, grpc.ChainUnaryInterceptor(unaryInterceptors...))
+	if cfg.AutenticacaoAtiva() {
+		grpcOpts = append(grpcOpts, grpc.StreamInterceptor(grpcapi.AutenticarStream(cfg.ChaveServico)))
+	}
+
 	servidorGRPC := grpc.NewServer(grpcOpts...)
 	servicoGRPC := grpcapi.NovoServidor(servico, cfg.ChaveServico)
 	servicoGRPC.RegistrarServico(servidorGRPC)
@@ -146,7 +209,7 @@ func executar() error {
 
 	// Inicia REST
 	go func() {
-		slog.Info("Botão de Pânico REST ouvindo",
+		slog.Info("servidor REST ouvindo",
 			"endereco", "http://localhost:"+cfg.Porta,
 			"banco", cfg.URLBanco,
 			"geocodificacao", cfg.GeocodificacaoAtiva(),
@@ -160,7 +223,7 @@ func executar() error {
 
 	// Inicia gRPC (escutando em localhost/configurado)
 	go func() {
-		slog.Info("Botão de Pânico gRPC ouvindo",
+		slog.Info("servidor gRPC ouvindo",
 			"endereco", cfg.EnderecoGRPC(),
 			"autenticacao", cfg.AutenticacaoAtiva(),
 			"filas_ativas", cfg.FilasAtivas,
@@ -174,7 +237,7 @@ func executar() error {
 	case err := <-erroServidor:
 		return err
 	case <-ctx.Done():
-		slog.Info("encerrando servidores REST, gRPC e mensageria...")
+		slog.Info("encerrando servidores REST, gRPC e mensageria RabbitMQ...")
 		ctxDesligar, cancelarDesligar := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelarDesligar()
 
@@ -184,16 +247,21 @@ func executar() error {
 		// Encerramento gracioso HTTP
 		errHTTP := servidorHTTP.Shutdown(ctxDesligar)
 
-		// Encerramento Outbox Relay e Workers
+		// Encerramento Outbox Relay e Consumidores
 		if relayOutbox != nil {
 			relayOutbox.Parar()
 		}
-		if workerNotificacoes != nil {
-			workerNotificacoes.Parar(cfg.TimeoutWorker)
+		if consNotificacoes != nil {
+			consNotificacoes.Parar(cfg.TimeoutWorker)
 		}
-		if gerenciadorNATS != nil {
-			gerenciadorNATS.Fechar()
+		if consAuditoria != nil {
+			consAuditoria.Parar(cfg.TimeoutWorker)
 		}
+		if gerRabbitMQ != nil {
+			_ = gerRabbitMQ.Fechar()
+		}
+
+		slog.Info("microserviço encerrado graciosamente")
 		return errHTTP
 	}
 }

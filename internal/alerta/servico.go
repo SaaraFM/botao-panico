@@ -39,11 +39,18 @@ type RepositorioOutbox interface {
 	BuscarTarefaPorAlertaID(ctx context.Context, alertaID string) (TarefaOutbox, error)
 }
 
+// RepositorioAuditoria gerencia os registros independentes de auditoria.
+type RepositorioAuditoria interface {
+	SalvarAuditoria(ctx context.Context, reg RegistroAuditoria) error
+	ListarAuditoria(ctx context.Context, limite int) ([]RegistroAuditoria, error)
+}
+
 // Repositorio reúne as interfaces de armazenamento necessárias pelo serviço.
 type Repositorio interface {
 	RepositorioContatos
 	RepositorioAlertas
 	RepositorioOutbox
+	RepositorioAuditoria
 }
 
 // DespachanteNotificacao envia as notificações (implementado com concorrência).
@@ -161,7 +168,9 @@ func (s *Servico) Acionar(ctx context.Context, pedido PedidoAlerta) (Alerta, err
 	}
 	a.InstituicoesAlvo = instituicoes
 
-	// FLUXO ASSÍNCRONO COM TRANSACTIONAL OUTBOX (Semana 12 CIT7219)
+	// FLUXO ASSÍNCRONO COM TRANSACTIONAL OUTBOX:
+	// O alerta é imediatamente colocado em estado "processando" para que a requisição HTTP retorne
+	// em milissegundos sem travar a usuária. A tarefa de mensageria é salva no mesmo commit do banco.
 	if s.modoAssincrono {
 		a.Status = StatusProcessando
 
@@ -170,22 +179,32 @@ func (s *Servico) Acionar(ctx context.Context, pedido PedidoAlerta) (Alerta, err
 			return Alerta{}, fmt.Errorf("gerar id da tarefa outbox: %w", err)
 		}
 
-		evento := EventoAlertaCriado{
-			TarefaID:  "tarefa-" + tarefaID,
-			AlertaID:  a.ID,
-			UsuariaID: a.UsuariaID,
-			Nivel:     string(a.Nivel),
-			CriadoEm:  agora.Format(time.RFC3339Nano),
-		}
-		payloadBytes, err := json.Marshal(evento)
+		eventoID, err := novoID()
 		if err != nil {
-			return Alerta{}, fmt.Errorf("serializar evento outbox: %w", err)
+			return Alerta{}, fmt.Errorf("gerar id do evento: %w", err)
+		}
+
+		envelope := Envelope{
+			Evento:    "alerta.criado",
+			Versao:    1,
+			IDEvento:  "evt-" + eventoID,
+			EmitidoEm: agora.UTC(),
+			Dados: DadosEvento{
+				TarefaID:  "tarefa-" + tarefaID,
+				AlertaID:  a.ID,
+				UsuariaID: a.UsuariaID,
+				Nivel:     string(a.Nivel),
+			},
+		}
+		payloadBytes, err := json.Marshal(envelope)
+		if err != nil {
+			return Alerta{}, fmt.Errorf("serializar envelope outbox: %w", err)
 		}
 
 		tarefa := TarefaOutbox{
 			ID:                 "tarefa-" + tarefaID,
 			AlertaID:           a.ID,
-			Topico:             "alertas.notificar",
+			Topico:             "alerta.criado",
 			PayloadJSON:        string(payloadBytes),
 			Estado:             EstadoTarefaPendente,
 			MaxTentativas:      5,
@@ -285,6 +304,16 @@ func (s *Servico) ProcessarTarefaNotificacao(ctx context.Context, alertaID strin
 		return fmt.Errorf("atualizar alerta com notificacoes: %w", err)
 	}
 	return nil
+}
+
+// SalvarAuditoria persiste um registro imutável do evento consumido pelo worker de auditoria.
+func (s *Servico) SalvarAuditoria(ctx context.Context, reg RegistroAuditoria) error {
+	return s.repositorio.SalvarAuditoria(ctx, reg)
+}
+
+// ListarAuditoria retorna os últimos eventos auditados.
+func (s *Servico) ListarAuditoria(ctx context.Context, limite int) ([]RegistroAuditoria, error) {
+	return s.repositorio.ListarAuditoria(ctx, limite)
 }
 
 // Buscar devolve um alerta pelo ID (ErrNaoEncontrado se não existir).

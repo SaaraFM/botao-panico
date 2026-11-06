@@ -2,20 +2,31 @@ package fila
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"math"
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/plataforma-mulher/botao-panico/internal/alerta"
 )
 
-// OutboxRelay é o componente em background que lê tarefas persistidas na tabela 'tarefas_outbox'
-// e as publica de forma confiável no NATS JetStream, garantindo entrega 'at-least-once'.
+// Publicador define o contrato para publicação de eventos no broker de mensageria.
+type Publicador interface {
+	Publicar(ctx context.Context, routingKey string, env alerta.Envelope) error
+}
+
+// OutboxRelay ("Retransmissor do Outbox") é o componente de segundo plano que implementa
+// a segunda metade do padrão Transactional Outbox:
+// 1. O serviço salva o alerta e a tarefa no SQLite na mesma transação atômica.
+// 2. O OutboxRelay lê continuamente tarefas com estado 'pendente' e publica no RabbitMQ.
+// 3. Ao receber o Publisher Confirm do broker, atualiza o estado para 'publicado'.
+// Isso garante o modelo de entrega "at-least-once": se o broker cair, as mensagens continuam
+// salvas no SQLite aguardando reconexão, eliminando qualquer risco de perda de alertas.
 type OutboxRelay struct {
 	repo       alerta.RepositorioOutbox
-	js         nats.JetStreamContext
+	publicador Publicador
 	topico     string
 	intervalo  time.Duration
 	gatilhoCh  chan struct{}
@@ -26,10 +37,10 @@ type OutboxRelay struct {
 	executando bool
 }
 
-// NovoOutboxRelay inicializa o publisher do Outbox.
+// NovoOutboxRelay inicializa o publisher do Transactional Outbox.
 func NovoOutboxRelay(
 	repo alerta.RepositorioOutbox,
-	js nats.JetStreamContext,
+	pub Publicador,
 	topicoPadrao string,
 	intervaloVarredura ...time.Duration,
 ) *OutboxRelay {
@@ -39,19 +50,19 @@ func NovoOutboxRelay(
 	}
 
 	if topicoPadrao == "" {
-		topicoPadrao = "alertas.notificar"
+		topicoPadrao = "alerta.criado"
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &OutboxRelay{
-		repo:      repo,
-		js:        js,
-		topico:    topicoPadrao,
-		intervalo: intervalo,
-		gatilhoCh: make(chan struct{}, 1),
-		ctx:       ctx,
-		cancel:    cancel,
+		repo:       repo,
+		publicador: pub,
+		topico:     topicoPadrao,
+		intervalo:  intervalo,
+		gatilhoCh:  make(chan struct{}, 1),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 }
 
@@ -84,7 +95,7 @@ func (r *OutboxRelay) loop() {
 	ticker := time.NewTicker(r.intervalo)
 	defer ticker.Stop()
 
-	// Processa tarefas pendentes que possam ter ficado de execuções anteriores (recuperação pós-reinicialização)
+	// Processa tarefas pendentes remanescentes de execuções anteriores (recuperação pós-reinicialização)
 	r.processarLote(r.ctx)
 
 	for {
@@ -99,68 +110,99 @@ func (r *OutboxRelay) loop() {
 	}
 }
 
-// processarLote busca tarefas pendentes no SQLite e as publica no NATS JetStream.
+// processarLote busca até 20 tarefas pendentes e publica cada uma no RabbitMQ.
 func (r *OutboxRelay) processarLote(ctx context.Context) {
-	tarefas, err := r.repo.BuscarTarefasPendentes(ctx, 50)
-	if err != nil {
-		slog.Error("outbox relay: falha ao buscar tarefas pendentes", "erro", err)
+	if r.publicador == nil {
 		return
 	}
 
-	for _, t := range tarefas {
+	tarefas, err := r.repo.BuscarTarefasPendentes(ctx, 20)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			slog.Error("falha ao buscar tarefas pendentes na outbox", "erro", err)
+		}
+		return
+	}
+
+	for _, tarefa := range tarefas {
 		if ctx.Err() != nil {
 			return
 		}
-
-		topico := t.Topico
-		if topico == "" {
-			topico = r.topico
-		}
-
-		// Publicação no NATS JetStream com Nats-Msg-Id para garantir deduplicação nativa
-		msg := &nats.Msg{
-			Subject: topico,
-			Header: nats.Header{
-				"Nats-Msg-Id": []string{t.ID},
-			},
-			Data: []byte(t.PayloadJSON),
-		}
-
-		pubAck, err := r.js.PublishMsg(msg)
-		if err != nil {
-			// Falha na publicação: calcula backoff exponencial e registra tentativa
-			backoff := calcularBackoff(t.Tentativas)
-			proxTentativa := time.Now().Add(backoff)
-			_ = r.repo.IncrementarFalhaTarefa(ctx, t.ID, err.Error(), proxTentativa)
-			slog.Warn("outbox relay: falha ao publicar tarefa no nats",
-				"tarefa_id", t.ID, "alerta_id", t.AlertaID, "erro", err, "proxima_tentativa", proxTentativa)
-			continue
-		}
-
-		// Publicação confirmada pelo broker (Ack recebido): atualiza estado da tarefa no banco
-		if pubAck != nil {
-			if err := r.repo.MarcarTarefaPublicada(ctx, t.ID); err != nil {
-				slog.Error("outbox relay: falha ao marcar tarefa como publicada", "tarefa_id", t.ID, "erro", err)
-			}
-		}
+		r.processarUmaTarefa(ctx, tarefa)
 	}
 }
 
-// Parar encerra o relay de forma graciosa.
+// processarUmaTarefa desserializa o envelope e despacha ao broker.
+func (r *OutboxRelay) processarUmaTarefa(ctx context.Context, t alerta.TarefaOutbox) {
+	var env alerta.Envelope
+	if err := json.Unmarshal([]byte(t.PayloadJSON), &env); err != nil {
+		slog.Error("payload JSON da tarefa outbox inválido", "tarefa_id", t.ID, "alerta_id", t.AlertaID, "erro", err)
+		_ = r.repo.IncrementarFalhaTarefa(ctx, t.ID, "json inválido: "+err.Error(), time.Now().Add(24*time.Hour))
+		return
+	}
+
+	routingKey := t.Topico
+	if routingKey == "" {
+		routingKey = r.topico
+	}
+
+	// Publica no broker com Publisher Confirms
+	ctxPub, cancelPub := context.WithTimeout(ctx, 3*time.Second)
+	err := r.publicador.Publicar(ctxPub, routingKey, env)
+	cancelPub()
+
+	if err != nil {
+		proximaTentativa := calcularBackoff(t.Tentativas)
+		slog.Warn("falha ao publicar tarefa no rabbitmq; agendando retentativa",
+			"tarefa_id", t.ID,
+			"alerta_id", t.AlertaID,
+			"tentativa", t.Tentativas+1,
+			"proxima_em", proximaTentativa.Format(time.RFC3339),
+			"erro", err.Error(),
+		)
+		_ = r.repo.IncrementarFalhaTarefa(ctx, t.ID, err.Error(), proximaTentativa)
+		return
+	}
+
+	// Sucesso confirmado: marca como 'publicado' no SQLite
+	if err := r.repo.MarcarTarefaPublicada(ctx, t.ID); err != nil {
+		slog.Error("erro ao marcar tarefa como publicada no sqlite",
+			"tarefa_id", t.ID,
+			"alerta_id", t.AlertaID,
+			"erro", err,
+		)
+		return
+	}
+
+	slog.Info("tarefa outbox publicada e confirmada no rabbitmq",
+		"tarefa_id", t.ID,
+		"alerta_id", t.AlertaID,
+		"evento", env.Evento,
+		"id_evento", env.IDEvento,
+		"routing_key", routingKey,
+	)
+}
+
+// Parar interrompe o relay de forma graciosa.
 func (r *OutboxRelay) Parar() {
-	r.cancel()
-	r.wg.Wait()
 	r.mu.Lock()
+	if !r.executando {
+		r.mu.Unlock()
+		return
+	}
 	r.executando = false
+	r.cancel()
 	r.mu.Unlock()
+
+	r.wg.Wait()
+	slog.Info("outbox relay finalizado")
 }
 
-// calcularBackoff calcula espera exponencial com jitter básico (ex.: 500ms, 1s, 2s, 4s, 8s).
-func calcularBackoff(tentativas int) time.Duration {
-	base := 500 * time.Millisecond
-	if tentativas > 6 {
-		tentativas = 6
+func calcularBackoff(tentativas int) time.Time {
+	// Backoff exponencial: 1s, 2s, 4s, 8s... até 1 minuto
+	segundos := math.Pow(2, float64(tentativas))
+	if segundos > 60 {
+		segundos = 60
 	}
-	fator := math.Pow(2, float64(tentativas))
-	return time.Duration(float64(base) * fator)
+	return time.Now().Add(time.Duration(segundos) * time.Second)
 }
