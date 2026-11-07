@@ -328,6 +328,41 @@ func TestAcionar_VariosAlertasSimultaneos(t *testing.T) {
 	assert.Len(t, lista, 30)
 }
 
+func TestAcionar_ModoAssincronoComCircuitBreakerNaoTravaOutbox(t *testing.T) {
+	repo := armazenamento.NovaMemoria()
+	desp := &despachanteFalso{}
+	// Simula Geocodificador com erro de Circuit Breaker aberto
+	geoComCB := geoFalso{err: errors.New("circuit breaker aberto: requisição bloqueada preventivamente (fail-fast)")}
+	servico := alerta.NovoServico(repo, desp, geoComCB, time.Second)
+
+	notificado := false
+	servico.AtivarModoAssincrono(func() {
+		notificado = true
+	})
+
+	inicio := time.Now()
+	a, err := servico.Acionar(context.Background(), alerta.PedidoAlerta{
+		UsuariaID: armazenamento.UsuariaDemo,
+		Nivel:     alerta.RiscoCritico,
+		Local:     localValido,
+		Mensagem:  "socorro imediato",
+	})
+	duracao := time.Since(inicio)
+
+	require.NoError(t, err, "o acionamento não pode falhar mesmo se o circuit breaker de geocodificação estiver aberto")
+	assert.Equal(t, alerta.StatusProcessando, a.Status)
+	assert.Equal(t, localValido, a.Local, "as coordenadas originais devem ser 100% preservadas")
+	assert.True(t, notificado, "o gatilho do outbox relay deve ser acionado")
+	assert.Less(t, duracao, 50*time.Millisecond, "o retorno assíncrono deve ser imediato sem esperar geocodificação")
+
+	// Verifica se a tarefa no Transactional Outbox foi persistida no repositório
+	tarefas, err := repo.BuscarTarefasPendentes(context.Background(), 10)
+	require.NoError(t, err)
+	require.Len(t, tarefas, 1)
+	assert.Equal(t, a.ID, tarefas[0].AlertaID)
+	assert.Equal(t, alerta.EstadoTarefaPendente, tarefas[0].Estado)
+}
+
 func TestBuscar_Inexistente(t *testing.T) {
 	servico := alerta.NovoServico(armazenamento.NovaMemoria(), &despachanteFalso{}, nil, time.Second)
 	_, err := servico.Buscar(context.Background(), "nao-existe")

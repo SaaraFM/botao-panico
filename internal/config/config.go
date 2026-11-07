@@ -47,30 +47,38 @@ type Config struct {
 	SMTPUsuario    string // SMTP_USER
 	SMTPSenha      string // SMTP_PASS
 	SMTPRemetente  string // SMTP_FROM
+
+	// Configurações de Resiliência e Circuit Breaker para APIs externas (Nominatim)
+	CircuitBreakerMaxFalhas          int           // CIRCUIT_BREAKER_MAX_FALHAS (padrão: 3)
+	CircuitBreakerTimeoutRecuperacao time.Duration // CIRCUIT_BREAKER_TIMEOUT_RECUPERACAO (padrão: 10s)
+	NominatimIntervaloMinimo         time.Duration // NOMINATIM_INTERVALO_MINIMO (padrão: 1s, política OSM)
 }
 
 // Valores padrão para desenvolvimento local.
 const (
-	PortaPadrao                  = "8080"
-	PortaIntegracao              = "8081" // Porta recomendada para integração com Plataforma da Mulher
-	PortaGRPCPadrao              = "50051"
-	HostGRPCPadrao               = "127.0.0.1" // Padrão seguro restrito a localhost
-	AMQPURLPadrao                = "amqp://guest:guest@127.0.0.1:5672/"
-	ExchangeEventosPadrao        = "panico.eventos"
-	ExchangeDLXPadrao            = "panico.eventos.dlx"
-	FilaNotificacoesPadrao       = "panico.alertas.notificacoes"
-	RoutingKeyNotificacoesPadrao = "alerta.criado"
-	FilaAuditoriaPadrao          = "panico.alertas.auditoria"
-	RoutingKeyAuditoriaPadrao    = "#"
-	FilaDLQPadrao                = "panico.alertas.dlq"
-	TimeoutWorkerPadrao          = 5 * time.Second
-	URLBancoPadrao               = "file:botao_panico.db"
-	URLAPIExternaPadrao          = "https://nominatim.openstreetmap.org"
-	TimeoutAPIExternaPadrao      = 3 * time.Second
-	AgentePadrao                 = "botao-panico-plataforma-mulher/1.0 (trabalho academico CIT7219)"
-	TimeoutNotificacoesPadrao    = 5 * time.Second
-	MinimoCaracteresChave        = 16
-	SMTPPortaPadrao              = "587"
+	PortaPadrao                            = "8080"
+	PortaIntegracao                        = "8081" // Porta recomendada para integração com Plataforma da Mulher
+	PortaGRPCPadrao                        = "50051"
+	HostGRPCPadrao                         = "127.0.0.1" // Padrão seguro restrito a localhost
+	AMQPURLPadrao                          = "amqp://guest:guest@127.0.0.1:5672/"
+	ExchangeEventosPadrao                  = "panico.eventos"
+	ExchangeDLXPadrao                      = "panico.eventos.dlx"
+	FilaNotificacoesPadrao                 = "panico.alertas.notificacoes"
+	RoutingKeyNotificacoesPadrao           = "alerta.criado"
+	FilaAuditoriaPadrao                    = "panico.alertas.auditoria"
+	RoutingKeyAuditoriaPadrao              = "#"
+	FilaDLQPadrao                          = "panico.alertas.dlq"
+	TimeoutWorkerPadrao                    = 5 * time.Second
+	URLBancoPadrao                         = "file:botao_panico.db"
+	URLAPIExternaPadrao                    = "https://nominatim.openstreetmap.org"
+	TimeoutAPIExternaPadrao                = 3 * time.Second
+	AgentePadrao                           = "botao-panico-plataforma-mulher/1.0 (trabalho academico CIT7219)"
+	TimeoutNotificacoesPadrao              = 5 * time.Second
+	MinimoCaracteresChave                  = 16
+	SMTPPortaPadrao                        = "587"
+	CircuitBreakerMaxFalhasPadrao          = 3
+	CircuitBreakerTimeoutRecuperacaoPadrao = 10 * time.Second
+	NominatimIntervaloMinimoPadrao         = 1 * time.Second
 )
 
 // Carregar lê as variáveis usando os.LookupEnv.
@@ -157,6 +165,27 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 		errs = append(errs, fmt.Errorf("NOTIFICATION_TIMEOUT: %w", err))
 	}
 
+	// Resiliência / Circuit Breaker
+	if falhas, err := strconv.Atoi(ler("CIRCUIT_BREAKER_MAX_FALHAS", strconv.Itoa(CircuitBreakerMaxFalhasPadrao))); err == nil && falhas > 0 {
+		cfg.CircuitBreakerMaxFalhas = falhas
+	} else if err != nil {
+		errs = append(errs, fmt.Errorf("CIRCUIT_BREAKER_MAX_FALHAS inválido: %w", err))
+	} else {
+		cfg.CircuitBreakerMaxFalhas = CircuitBreakerMaxFalhasPadrao
+	}
+
+	if timeoutCB, err := lerDuracao(ler("CIRCUIT_BREAKER_TIMEOUT_RECUPERACAO", ""), CircuitBreakerTimeoutRecuperacaoPadrao); err == nil {
+		cfg.CircuitBreakerTimeoutRecuperacao = timeoutCB
+	} else {
+		errs = append(errs, fmt.Errorf("CIRCUIT_BREAKER_TIMEOUT_RECUPERACAO: %w", err))
+	}
+
+	if intervalo, err := lerDuracaoIntervalo(ler("NOMINATIM_INTERVALO_MINIMO", ""), NominatimIntervaloMinimoPadrao); err == nil {
+		cfg.NominatimIntervaloMinimo = intervalo
+	} else {
+		errs = append(errs, fmt.Errorf("NOMINATIM_INTERVALO_MINIMO: %w", err))
+	}
+
 	// Segurança: se a autenticação estiver ativada explicitamente ou se SERVICE_KEY for informada,
 	// valida para impedir que falhas de configuração exponham endpoints sensíveis por engano.
 	if cfg.ExigirAutenticacao || cfg.ChaveServico != "" {
@@ -208,6 +237,23 @@ func lerDuracao(valor string, padrao time.Duration) (time.Duration, error) {
 	}
 	if d <= 0 || d > time.Minute {
 		return 0, fmt.Errorf("valor %q fora do intervalo (0, 1m]", valor)
+	}
+	return d, nil
+}
+
+func lerDuracaoIntervalo(valor string, padrao time.Duration) (time.Duration, error) {
+	if valor == "" {
+		return padrao, nil
+	}
+	if valor == "0" || valor == "0s" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(valor)
+	if err != nil {
+		return 0, fmt.Errorf("valor %q inválido (exemplos: 1s, 500ms, 0s)", valor)
+	}
+	if d < 0 || d > time.Minute {
+		return 0, fmt.Errorf("valor %q fora do intervalo [0, 1m]", valor)
 	}
 	return d, nil
 }

@@ -84,7 +84,14 @@ func executar() error {
 	// 3. API externa de geocodificação (opcional).
 	var geo alerta.Geocodificador
 	if cfg.GeocodificacaoAtiva() {
-		geo = cliente.NovoNominatim(cfg.URLAPIExterna, cfg.AgenteAPIExterna, cfg.TimeoutAPIExterna)
+		geo = cliente.NovoNominatimComOpcoes(cliente.OpcoesNominatim{
+			URLBase:            cfg.URLAPIExterna,
+			Agente:             cfg.AgenteAPIExterna,
+			Timeout:            cfg.TimeoutAPIExterna,
+			MaxFalhasCB:        cfg.CircuitBreakerMaxFalhas,
+			TimeoutRecuperacao: cfg.CircuitBreakerTimeoutRecuperacao,
+			IntervaloMinimo:    cfg.NominatimIntervaloMinimo,
+		})
 	}
 
 	// 4. Regras de negócio compartilhadas entre REST e gRPC.
