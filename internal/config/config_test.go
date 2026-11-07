@@ -42,6 +42,11 @@ func TestCarregar_Padroes(t *testing.T) {
 	assert.Equal(t, "panico.alertas.dlq", cfg.FilaDLQ)
 	assert.Equal(t, 5*time.Second, cfg.TimeoutWorker)
 	assert.False(t, cfg.EmailDemoAtivo)
+
+	// Defaults de resiliência e rate limiting
+	assert.Equal(t, 3, cfg.CircuitBreakerMaxFalhas)
+	assert.Equal(t, 10*time.Second, cfg.CircuitBreakerTimeoutRecuperacao)
+	assert.Equal(t, 1*time.Second, cfg.NominatimIntervaloMinimo)
 }
 
 func TestCarregar_Personalizado(t *testing.T) {
@@ -51,6 +56,9 @@ func TestCarregar_Personalizado(t *testing.T) {
 		"EXTERNAL_API_TIMEOUT": "750ms", "NOTIFICATION_TIMEOUT": "2s",
 		"SERVICE_KEY":  "segredo-super-seguro-com-mais-de-16-chars",
 		"FILAS_ATIVAS": "false",
+		"CIRCUIT_BREAKER_MAX_FALHAS":          "5",
+		"CIRCUIT_BREAKER_TIMEOUT_RECUPERACAO": "20s",
+		"NOMINATIM_INTERVALO_MINIMO":         "500ms",
 	}))
 	require.NoError(t, err)
 	assert.False(t, cfg.FilasAtivas)
@@ -63,6 +71,9 @@ func TestCarregar_Personalizado(t *testing.T) {
 	assert.Equal(t, 2*time.Second, cfg.TimeoutNotificacoes)
 	assert.True(t, cfg.AutenticacaoAtiva())
 	assert.Equal(t, "segredo-super-seguro-com-mais-de-16-chars", cfg.ChaveServico)
+	assert.Equal(t, 5, cfg.CircuitBreakerMaxFalhas)
+	assert.Equal(t, 20*time.Second, cfg.CircuitBreakerTimeoutRecuperacao)
+	assert.Equal(t, 500*time.Millisecond, cfg.NominatimIntervaloMinimo)
 }
 
 func TestCarregar_ConflitoPortas(t *testing.T) {
@@ -132,4 +143,24 @@ func TestCarregar_EmailDemoValidacao(t *testing.T) {
 	assert.True(t, cfg.EmailDemoAtivo)
 	assert.Equal(t, "smtp.gmail.com", cfg.SMTPHost)
 	assert.Equal(t, "teste@demo.local", cfg.SMTPRemetente)
+}
+
+func TestCarregar_CircuitBreakerInvalido(t *testing.T) {
+	_, err := config.CarregarDe(fonte(map[string]string{
+		"CIRCUIT_BREAKER_MAX_FALHAS": "invalido",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CIRCUIT_BREAKER_MAX_FALHAS")
+
+	_, err = config.CarregarDe(fonte(map[string]string{
+		"CIRCUIT_BREAKER_TIMEOUT_RECUPERACAO": "tempo_errado",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CIRCUIT_BREAKER_TIMEOUT_RECUPERACAO")
+
+	_, err = config.CarregarDe(fonte(map[string]string{
+		"NOMINATIM_INTERVALO_MINIMO": "tempo_errado",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NOMINATIM_INTERVALO_MINIMO")
 }
