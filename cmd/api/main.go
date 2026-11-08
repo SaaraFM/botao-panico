@@ -114,12 +114,20 @@ func executar() error {
 			Porta:     cfg.SMTPPorta,
 			Usuario:   cfg.SMTPUsuario,
 			Senha:     cfg.SMTPSenha,
-			Remetente: cfg.SMTPRemetente,
+			Remetente:                cfg.SMTPRemetente,
+			DestinatariosAutorizados: cfg.EmailDestinatariosAutorizados,
+			MaxEnvios:                cfg.EmailDemoMaxPorHora,
+			Timeout:                  cfg.EmailDemoTimeout,
+			ExigirTLS:                cfg.SMTPExigirTLS,
+			Repo:                     repo,
+			Metricas:                 metricas,
 		})
-		slog.Info("e-mail demonstrativo real ATIVADO (restrito a "+config.EmailAutorizadoDemo+")",
-			"destinatario_autorizado", config.EmailAutorizadoDemo,
+		slog.Info("e-mail demonstrativo real ATIVADO (restrito)",
+			"destinatarios_autorizados", cfg.EmailDestinatariosAutorizados,
 			"smtp_host", cfg.SMTPHost,
-		)
+			"exigir_tls", cfg.SMTPExigirTLS,
+			"max_envios_hora", cfg.EmailDemoMaxPorHora,
+			)
 	}
 
 	// 6. Mensageria RabbitMQ AMQP 0-9-1 (Semana 13 CIT7219)
@@ -307,3 +315,4 @@ func executar() error {
 		return errHTTP
 	}
 }
+

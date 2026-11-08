@@ -37,6 +37,11 @@ type Metricas struct {
 	CircuitBreakerEstado          *prometheus.GaugeVec
 	CircuitBreakerRejeicoesTotal  *prometheus.CounterVec
 	CircuitBreakerTransicoesTotal *prometheus.CounterVec
+
+	// 5. E-mail Demonstrativo Acadêmico
+	EmailDemoEnviosTotal       *prometheus.CounterVec
+	EmailDemoRetentativasTotal *prometheus.CounterVec
+	EmailDemoDuracaoSegundos   *prometheus.HistogramVec
 }
 
 // NovaMetricas instancia e registra os coletores em um Registry isolado.
@@ -153,6 +158,36 @@ func NovaMetricas() *Metricas {
 			},
 			[]string{"nome", "de", "para"},
 		),
+
+		// 5. E-mail Demonstrativo
+		EmailDemoEnviosTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "botao_panico",
+				Subsystem: "email_demo",
+				Name:      "envios_total",
+				Help:      "Total de disparos de e-mail demonstrativo por status e motivo.",
+			},
+			[]string{"status", "motivo"},
+		),
+		EmailDemoRetentativasTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "botao_panico",
+				Subsystem: "email_demo",
+				Name:      "retentativas_total",
+				Help:      "Total de retentativas de envio de e-mail demonstrativo.",
+			},
+			[]string{"status"},
+		),
+		EmailDemoDuracaoSegundos: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: "botao_panico",
+				Subsystem: "email_demo",
+				Name:      "duracao_seconds",
+				Help:      "Duração da chamada SMTP em segundos.",
+				Buckets:   []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+			},
+			[]string{"status"},
+		),
 	}
 
 	reg.MustRegister(
@@ -167,6 +202,9 @@ func NovaMetricas() *Metricas {
 		m.CircuitBreakerEstado,
 		m.CircuitBreakerRejeicoesTotal,
 		m.CircuitBreakerTransicoesTotal,
+		m.EmailDemoEnviosTotal,
+		m.EmailDemoRetentativasTotal,
+		m.EmailDemoDuracaoSegundos,
 	)
 
 	return m
@@ -259,6 +297,23 @@ func (m *Metricas) RegistrarRejeicaoCircuitBreaker(nome string) {
 		return
 	}
 	m.CircuitBreakerRejeicoesTotal.WithLabelValues(nome).Inc()
+}
+
+// RegistrarEnvioEmailDemo computa o disparo de um e-mail demonstrativo por status e motivo.
+func (m *Metricas) RegistrarEnvioEmailDemo(status, motivo string, duracaoSegundos float64) {
+	if m == nil {
+		return
+	}
+	m.EmailDemoEnviosTotal.WithLabelValues(status, motivo).Inc()
+	m.EmailDemoDuracaoSegundos.WithLabelValues(status).Observe(duracaoSegundos)
+}
+
+// RegistrarRetentativaEmailDemo computa retentativas de envio do e-mail demonstrativo.
+func (m *Metricas) RegistrarRetentativaEmailDemo(status string) {
+	if m == nil {
+		return
+	}
+	m.EmailDemoRetentativasTotal.WithLabelValues(status).Inc()
 }
 
 // NormalizarRota mapeia rotas com parâmetros variáveis (como IDs) para padrões estáticos,

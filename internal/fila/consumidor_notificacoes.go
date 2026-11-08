@@ -211,7 +211,13 @@ func (c *ConsumidorNotificacoes) processarUmaEntrega(entrega amqp.Delivery) {
 
 	// 3. E-mail demonstrativo real opcional (Modo B - apenas se explicitamente habilitado)
 	if c.emailDemo != nil {
-		_ = c.emailDemo.EnviarAlertaDemonstrativo(ctxProc, alertaID)
+		if errEmail := c.emailDemo.EnviarAlertaDemonstrativo(ctxProc, alertaID); errEmail != nil {
+			slog.Warn("falha ao enviar e-mail demonstrativo; alerta preservado",
+				"alerta_id", alertaID,
+				"correlation_id", corrID,
+				"erro", errEmail.Error(),
+			)
+		}
 	}
 
 	// 4. Marca a tarefa da Outbox como concluída

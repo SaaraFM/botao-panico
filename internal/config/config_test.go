@@ -135,6 +135,7 @@ func TestCarregar_EmailDemoValidacao(t *testing.T) {
 	// Se EMAIL_DEMO_ATIVO for true mas SMTP não for informado, deve falhar
 	_, err := config.CarregarDe(fonte(map[string]string{
 		"EMAIL_DEMO_ATIVO": "true",
+		"SMTP_HOST":        "",
 	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SMTP_HOST")
@@ -149,6 +150,47 @@ func TestCarregar_EmailDemoValidacao(t *testing.T) {
 	assert.True(t, cfg.EmailDemoAtivo)
 	assert.Equal(t, "smtp.gmail.com", cfg.SMTPHost)
 	assert.Equal(t, "teste@demo.local", cfg.SMTPRemetente)
+	assert.True(t, cfg.SMTPExigirTLS)
+	assert.Equal(t, 5, cfg.EmailDemoMaxPorHora)
+	assert.Equal(t, 10*time.Second, cfg.EmailDemoTimeout)
+	assert.True(t, cfg.DestinatarioAutorizado("plataformadamulheroficial@gmail.com"))
+	assert.False(t, cfg.DestinatarioAutorizado("hacker@malicioso.com"))
+
+	// Configuração personalizada de destinatários e rate limit
+	cfgCustom, err := config.CarregarDe(fonte(map[string]string{
+		"EMAIL_DEMO_ATIVO":                "true",
+		"SMTP_HOST":                       "smtp.provedor.com",
+		"SMTP_FROM":                       "alerta@provedor.com",
+		"EMAIL_DESTINATARIOS_AUTORIZADOS": "prof.teste@ufsc.br, orientadora@ufsc.br",
+		"EMAIL_DEMO_MAX_POR_HORA":         "3",
+		"EMAIL_DEMO_TIMEOUT":              "15s",
+		"SMTP_EXIGIR_TLS":                 "true",
+	}))
+	require.NoError(t, err)
+	assert.True(t, cfgCustom.DestinatarioAutorizado("prof.teste@ufsc.br"))
+	assert.True(t, cfgCustom.DestinatarioAutorizado("orientadora@ufsc.br"))
+	assert.False(t, cfgCustom.DestinatarioAutorizado("outro@externo.com"))
+	assert.Equal(t, 3, cfgCustom.EmailDemoMaxPorHora)
+	assert.Equal(t, 15*time.Second, cfgCustom.EmailDemoTimeout)
+
+	// Falha com remetente inválido (sem @)
+	_, err = config.CarregarDe(fonte(map[string]string{
+		"EMAIL_DEMO_ATIVO": "true",
+		"SMTP_HOST":        "smtp.gmail.com",
+		"SMTP_FROM":        "remetente_invalido",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SMTP_FROM")
+
+	// Falha com destinatário autorizado inválido
+	_, err = config.CarregarDe(fonte(map[string]string{
+		"EMAIL_DEMO_ATIVO":                "true",
+		"SMTP_HOST":                       "smtp.gmail.com",
+		"SMTP_FROM":                       "alerta@demo.com",
+		"EMAIL_DESTINATARIOS_AUTORIZADOS": "destinatario_sem_arroba",
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "EMAIL_DESTINATARIOS_AUTORIZADOS")
 }
 
 func TestCarregar_CircuitBreakerInvalido(t *testing.T) {
