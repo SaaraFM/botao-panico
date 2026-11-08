@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/plataforma-mulher/botao-panico/internal/observabilidade"
 )
 
 // RepositorioContatos é a parte do armazenamento que lê a rede de apoio.
@@ -184,7 +186,10 @@ func (s *Servico) Acionar(ctx context.Context, pedido PedidoAlerta) (Alerta, err
 			return Alerta{}, fmt.Errorf("gerar id do evento: %w", err)
 		}
 
+		corrID := observabilidade.ObterCorrelationID(ctx)
+
 		envelope := Envelope{
+			CorrelationID: corrID,
 			Evento:    "alerta.criado",
 			Versao:    1,
 			IDEvento:  "evt-" + eventoID,

@@ -32,11 +32,12 @@ type TarefaOutbox struct {
 // Envelope segue a especificação padronizada de eventos (baseada em EVENTOS.md).
 // Garante interoperabilidade, versionamento e rastreabilidade nos brokers AMQP.
 type Envelope struct {
-	Evento    string      `json:"evento"`
-	Versao    int         `json:"versao"`
-	IDEvento  string      `json:"id_evento"`
-	EmitidoEm time.Time   `json:"emitido_em"`
-	Dados     DadosEvento `json:"dados"`
+	Evento        string      `json:"evento"`
+	Versao        int         `json:"versao"`
+	IDEvento      string      `json:"id_evento"`
+	CorrelationID string      `json:"correlation_id,omitempty"` // Rastreamento ponta a ponta
+	EmitidoEm     time.Time   `json:"emitido_em"`
+	Dados         DadosEvento `json:"dados"`
 }
 
 // DadosEvento contém apenas identificadores e dados mínimos necessários para processamento (Data Minimization).

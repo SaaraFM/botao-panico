@@ -47,6 +47,8 @@ func TestCarregar_Padroes(t *testing.T) {
 	assert.Equal(t, 3, cfg.CircuitBreakerMaxFalhas)
 	assert.Equal(t, 10*time.Second, cfg.CircuitBreakerTimeoutRecuperacao)
 	assert.Equal(t, 1*time.Second, cfg.NominatimIntervaloMinimo)
+	assert.True(t, cfg.MetricasAtivas)
+	assert.True(t, cfg.MetricasAcessoLocalIrrestrito)
 }
 
 func TestCarregar_Personalizado(t *testing.T) {
@@ -59,6 +61,8 @@ func TestCarregar_Personalizado(t *testing.T) {
 		"CIRCUIT_BREAKER_MAX_FALHAS":          "5",
 		"CIRCUIT_BREAKER_TIMEOUT_RECUPERACAO": "20s",
 		"NOMINATIM_INTERVALO_MINIMO":         "500ms",
+		"METRICAS_ATIVAS":                    "false",
+		"METRICAS_ACESSO_LOCAL_IRRESTRITO":   "false",
 	}))
 	require.NoError(t, err)
 	assert.False(t, cfg.FilasAtivas)
@@ -74,6 +78,8 @@ func TestCarregar_Personalizado(t *testing.T) {
 	assert.Equal(t, 5, cfg.CircuitBreakerMaxFalhas)
 	assert.Equal(t, 20*time.Second, cfg.CircuitBreakerTimeoutRecuperacao)
 	assert.Equal(t, 500*time.Millisecond, cfg.NominatimIntervaloMinimo)
+	assert.False(t, cfg.MetricasAtivas)
+	assert.False(t, cfg.MetricasAcessoLocalIrrestrito)
 }
 
 func TestCarregar_ConflitoPortas(t *testing.T) {

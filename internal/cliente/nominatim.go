@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/plataforma-mulher/botao-panico/internal/alerta"
+	"github.com/plataforma-mulher/botao-panico/internal/observabilidade"
 	"github.com/plataforma-mulher/botao-panico/internal/resiliencia"
 )
 
@@ -41,6 +42,7 @@ type OpcoesNominatim struct {
 	TimeoutRecuperacao time.Duration
 	IntervaloMinimo    time.Duration
 	ClienteHTTP        *http.Client
+	Metricas           *observabilidade.Metricas
 }
 
 // Nominatim consulta a geocodificação reversa do OpenStreetMap
@@ -76,7 +78,21 @@ func NovoNominatimComOpcoes(opts OpcoesNominatim) *Nominatim {
 		recup = 10 * time.Second
 	}
 
+	var aoMudar func(nome string, ant, novo resiliencia.EstadoCircuito)
+	var aoRejeitar func(nome string)
+	if opts.Metricas != nil {
+		opts.Metricas.AtualizarEstadoCircuitBreaker("nominatim-osm", "CLOSED")
+		aoMudar = func(nome string, ant, novo resiliencia.EstadoCircuito) {
+			opts.Metricas.RegistrarTransicaoCircuitBreaker(nome, string(ant), string(novo))
+		}
+		aoRejeitar = func(nome string) {
+			opts.Metricas.RegistrarRejeicaoCircuitBreaker(nome)
+		}
+	}
+
 	cb := resiliencia.NovoCircuitBreaker(resiliencia.OpcoesCircuitBreaker{
+		AoMudarEstado:      aoMudar,
+		AoRejeitar:         aoRejeitar,
 		Nome:               "nominatim-osm",
 		MaxFalhas:          maxFalhas,
 		TimeoutRecuperacao: recup,

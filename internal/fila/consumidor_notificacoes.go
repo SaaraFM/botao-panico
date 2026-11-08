@@ -10,6 +10,7 @@ import (
 
 	"github.com/plataforma-mulher/botao-panico/internal/alerta"
 	"github.com/plataforma-mulher/botao-panico/internal/notificacao"
+	"github.com/plataforma-mulher/botao-panico/internal/observabilidade"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -21,6 +22,7 @@ type ConsumidorNotificacoes struct {
 	servico    *alerta.Servico
 	repo       alerta.RepositorioOutbox
 	emailDemo  *notificacao.EmailDemoNotificador
+	metricas   *observabilidade.Metricas
 	fila       string
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -34,6 +36,7 @@ type ConsumidorNotificacoes struct {
 type OpcoesConsumidorNotificacoes struct {
 	Fila      string
 	EmailDemo *notificacao.EmailDemoNotificador
+	Metricas  *observabilidade.Metricas
 }
 
 // NovoConsumidorNotificacoes instancia o Consumidor A.
@@ -56,8 +59,6 @@ func NovoConsumidorNotificacoes(
 	}
 
 	// QoS (Quality of Service) com prefetch count = 1:
-	// O RabbitMQ só entrega uma nova mensagem para este worker depois que a mensagem anterior
-	// tiver recebido o ACK manual. Isso evita sobrecarga de memória e distribui a carga de forma justa.
 	if err := canal.Qos(1, 0, false); err != nil {
 		_ = canal.Close()
 		return nil, fmt.Errorf("configurar qos: %w", err)
@@ -71,6 +72,7 @@ func NovoConsumidorNotificacoes(
 		servico:    servico,
 		repo:       repo,
 		emailDemo:  opts.EmailDemo,
+		metricas:   opts.Metricas,
 		fila:       opts.Fila,
 		ctx:        ctx,
 		cancel:     cancel,
@@ -137,6 +139,9 @@ func (c *ConsumidorNotificacoes) processarUmaEntrega(entrega amqp.Delivery) {
 			"delivery_tag", entrega.DeliveryTag,
 			"erro", err.Error(),
 		)
+		if c.metricas != nil {
+			c.metricas.RegistrarFalhaDLQ("notificacoes", "payload_invalido")
+		}
 		_ = entrega.Nack(false, false)
 		return
 	}
@@ -144,20 +149,31 @@ func (c *ConsumidorNotificacoes) processarUmaEntrega(entrega amqp.Delivery) {
 	alertaID := env.Dados.AlertaID
 	if alertaID == "" {
 		slog.Warn("envelope sem alerta_id válido, descartando para DLQ", "id_evento", env.IDEvento)
+		if c.metricas != nil {
+			c.metricas.RegistrarFalhaDLQ("notificacoes", "alerta_id_ausente")
+		}
 		_ = entrega.Nack(false, false)
 		return
 	}
 
+	corrID := env.CorrelationID
+	if corrID == "" {
+		corrID = entrega.CorrelationId
+	}
+	corrID = observabilidade.ExtrairOuGerarCorrelationID(corrID)
+
 	slog.Info("mensagem recebida pelo consumidor de notificações",
 		"evento", env.Evento,
 		"id_evento", env.IDEvento,
+		"correlation_id", corrID,
 		"alerta_id", alertaID,
 		"delivery_tag", entrega.DeliveryTag,
 	)
 
-	// 2. Processa as notificações do alerta no SQLite
+	// 2. Processa as notificações do alerta no SQLite com Correlation ID injetado no context
 	ctxProc, cancelProc := context.WithTimeout(c.ctx, 10*time.Second)
 	defer cancelProc()
+	ctxProc = observabilidade.InjetarCorrelationID(ctxProc, corrID)
 
 	err := c.servico.ProcessarTarefaNotificacao(ctxProc, alertaID)
 	if err != nil {
@@ -169,18 +185,26 @@ func (c *ConsumidorNotificacoes) processarUmaEntrega(entrega amqp.Delivery) {
 		if tent >= 3 {
 			slog.Error("limite de retentativas excedido; encaminhando mensagem para a DLQ",
 				"alerta_id", alertaID,
+				"correlation_id", corrID,
 				"tentativas", tent,
 				"erro", err.Error(),
 			)
+			if c.metricas != nil {
+				c.metricas.RegistrarFalhaDLQ("notificacoes", "limite_retentativas")
+			}
 			_ = entrega.Nack(false, false) // Sem requeue -> DLQ
 			return
 		}
 
 		slog.Warn("erro ao processar notificações do alerta; devolvendo à fila (NACK com requeue)",
 			"alerta_id", alertaID,
+			"correlation_id", corrID,
 			"tentativa", tent,
 			"erro", err.Error(),
 		)
+		if c.metricas != nil {
+			c.metricas.RegistrarConsumoRabbitMQ("notificacoes", "nack_requeue")
+		}
 		_ = entrega.Nack(false, true)
 		return
 	}
@@ -196,17 +220,19 @@ func (c *ConsumidorNotificacoes) processarUmaEntrega(entrega amqp.Delivery) {
 	}
 
 	// 5. ACK (Acknowledgement) manual após gravação e sucesso no banco:
-	// O envio do ACK é a confirmação para o RabbitMQ de que a mensagem foi processada e pode ser
-	// removida da fila. Fazer o ACK apenas no final garante que, se o processo cair durante o envio,
-	// a mensagem volta para a fila e não se perde.
 	if err := entrega.Ack(false); err != nil {
-		slog.Error("falha ao enviar ACK no rabbitmq", "alerta_id", alertaID, "erro", err)
+		slog.Error("falha ao enviar ACK no rabbitmq", "alerta_id", alertaID, "correlation_id", corrID, "erro", err)
 		return
+	}
+
+	if c.metricas != nil {
+		c.metricas.RegistrarConsumoRabbitMQ("notificacoes", "sucesso")
 	}
 
 	slog.Info("notificações processadas e confirmadas com sucesso (ACK manual)",
 		"evento", env.Evento,
 		"id_evento", env.IDEvento,
+		"correlation_id", corrID,
 		"alerta_id", alertaID,
 		"duracao_ms", time.Since(inicio).Milliseconds(),
 	)
