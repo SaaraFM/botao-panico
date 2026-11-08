@@ -46,7 +46,11 @@ type Config struct {
 	SMTPPorta      string // SMTP_PORT (padrão: 587)
 	SMTPUsuario    string // SMTP_USER
 	SMTPSenha      string // SMTP_PASS
-	SMTPRemetente  string // SMTP_FROM
+	SMTPRemetente                 string        // SMTP_FROM
+	EmailDestinatariosAutorizados []string      // EMAIL_DESTINATARIOS_AUTORIZADOS
+	EmailDemoMaxPorHora           int           // EMAIL_DEMO_MAX_POR_HORA (padrão: 5)
+	EmailDemoTimeout              time.Duration // EMAIL_DEMO_TIMEOUT (padrão: 10s)
+	SMTPExigirTLS                 bool          // SMTP_EXIGIR_TLS (padrão: true)
 
 	// Configurações de Resiliência e Circuit Breaker para APIs externas (Nominatim)
 	CircuitBreakerMaxFalhas          int           // CIRCUIT_BREAKER_MAX_FALHAS (padrão: 3)
@@ -79,7 +83,11 @@ const (
 	AgentePadrao                           = "botao-panico-plataforma-mulher/1.0 (trabalho academico CIT7219)"
 	TimeoutNotificacoesPadrao              = 5 * time.Second
 	MinimoCaracteresChave                  = 16
+	SMTPHostPadrao                         = "smtp.gmail.com"
 	SMTPPortaPadrao                        = "587"
+	EmailDemoMaxPorHoraPadrao              = 5
+	EmailDemoTimeoutPadrao                 = 10 * time.Second
+	SMTPExigirTLSPadrao                    = true
 	CircuitBreakerMaxFalhasPadrao          = 3
 	CircuitBreakerTimeoutRecuperacaoPadrao = 10 * time.Second
 	NominatimIntervaloMinimoPadrao         = 1 * time.Second
@@ -125,15 +133,42 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 
 		// E-mail demonstrativo acadêmico
 		EmailDemoAtivo: lerBool(ler("EMAIL_DEMO_ATIVO", "false")),
-		SMTPHost:       ler("SMTP_HOST", ""),
+		SMTPHost:       ler("SMTP_HOST", SMTPHostPadrao),
 		SMTPPorta:      ler("SMTP_PORT", SMTPPortaPadrao),
-		SMTPUsuario:    ler("SMTP_USER", ""),
+		SMTPUsuario:    ler("SMTP_USER", EmailAutorizadoDemo),
 		SMTPSenha:      ler("SMTP_PASS", ""),
-		SMTPRemetente:  ler("SMTP_FROM", ""),
+		SMTPRemetente:  ler("SMTP_FROM", EmailAutorizadoDemo),
+		SMTPExigirTLS:  lerBool(ler("SMTP_EXIGIR_TLS", "true")),
 
 		// Observabilidade e Métricas
 		MetricasAtivas:                lerBool(ler("METRICAS_ATIVAS", "true")),
 		MetricasAcessoLocalIrrestrito: lerBool(ler("METRICAS_ACESSO_LOCAL_IRRESTRITO", "true")),
+	}
+
+	rawDests := ler("EMAIL_DESTINATARIOS_AUTORIZADOS", EmailAutorizadoDemo)
+	for _, d := range strings.Split(rawDests, ",") {
+		dLimpo := strings.ToLower(strings.TrimSpace(d))
+		if dLimpo != "" {
+			cfg.EmailDestinatariosAutorizados = append(cfg.EmailDestinatariosAutorizados, dLimpo)
+		}
+	}
+	if len(cfg.EmailDestinatariosAutorizados) == 0 {
+		cfg.EmailDestinatariosAutorizados = []string{strings.ToLower(EmailAutorizadoDemo)}
+	}
+
+	maxEnviosStr := ler("EMAIL_DEMO_MAX_POR_HORA", strconv.Itoa(EmailDemoMaxPorHoraPadrao))
+	if maxEnvios, err := strconv.Atoi(maxEnviosStr); err == nil && maxEnvios > 0 {
+		cfg.EmailDemoMaxPorHora = maxEnvios
+	} else if err != nil {
+		errs = append(errs, fmt.Errorf("EMAIL_DEMO_MAX_POR_HORA inválido %q", maxEnviosStr))
+	} else {
+		cfg.EmailDemoMaxPorHora = EmailDemoMaxPorHoraPadrao
+	}
+
+	if timeoutEmail, err := lerDuracao(ler("EMAIL_DEMO_TIMEOUT", ""), EmailDemoTimeoutPadrao); err == nil {
+		cfg.EmailDemoTimeout = timeoutEmail
+	} else {
+		errs = append(errs, fmt.Errorf("EMAIL_DEMO_TIMEOUT: %w", err))
 	}
 
 	if timeoutWorker, err := lerDuracao(ler("WORKER_SHUTDOWN_TIMEOUT", ""), TimeoutWorkerPadrao); err == nil {
@@ -213,6 +248,22 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 		}
 		if cfg.SMTPRemetente == "" {
 			errs = append(errs, errors.New("EMAIL_DEMO_ATIVO está ativo, mas SMTP_FROM não foi configurado"))
+		} else if !strings.Contains(cfg.SMTPRemetente, "@") {
+			errs = append(errs, fmt.Errorf("SMTP_FROM inválido %q", cfg.SMTPRemetente))
+		}
+		if len(cfg.EmailDestinatariosAutorizados) == 0 {
+			errs = append(errs, errors.New("EMAIL_DEMO_ATIVO está ativo, mas nenhum destinatário autorizado foi configurado"))
+		}
+		for _, d := range cfg.EmailDestinatariosAutorizados {
+			if !strings.Contains(d, "@") {
+				errs = append(errs, fmt.Errorf("EMAIL_DESTINATARIOS_AUTORIZADOS contém endereço inválido %q", d))
+			}
+		}
+		if p, err := strconv.Atoi(cfg.SMTPPorta); err != nil || p < 1 || p > 65535 {
+			errs = append(errs, fmt.Errorf("SMTP_PORT inválida %q: use um número entre 1 e 65535", cfg.SMTPPorta))
+		}
+		if cfg.EmailDemoMaxPorHora <= 0 {
+			errs = append(errs, fmt.Errorf("EMAIL_DEMO_MAX_POR_HORA deve ser maior que zero (recebeu %d)", cfg.EmailDemoMaxPorHora))
 		}
 	}
 
@@ -230,6 +281,20 @@ func (c Config) GeocodificacaoAtiva() bool {
 // AutenticacaoAtiva indica se a autenticação serviço-a-serviço está configurada.
 func (c Config) AutenticacaoAtiva() bool {
 	return c.ChaveServico != ""
+}
+
+// DestinatarioAutorizado verifica se o e-mail está na lista restrita autorizada.
+func (c Config) DestinatarioAutorizado(email string) bool {
+	norm := strings.ToLower(strings.TrimSpace(email))
+	if norm == "" {
+		return false
+	}
+	for _, a := range c.EmailDestinatariosAutorizados {
+		if norm == a {
+			return true
+		}
+	}
+	return false
 }
 
 // EnderecoGRPC devolve o host:porta formatado para o listener gRPC.
@@ -272,3 +337,4 @@ func lerBool(valor string) bool {
 	b, _ := strconv.ParseBool(strings.TrimSpace(valor))
 	return b
 }
+

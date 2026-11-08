@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS notificacoes (
 	enviado_em TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notificacoes_alerta ON notificacoes(alerta_id);
+CREATE INDEX IF NOT EXISTS idx_notificacoes_canal ON notificacoes(alerta_id, canal, sucesso);
 
 CREATE TABLE IF NOT EXISTS alerta_instituicoes (
 	alerta_id      TEXT NOT NULL REFERENCES alertas(id) ON DELETE CASCADE,
@@ -549,4 +550,48 @@ func (s *SQLite) ListarAuditoria(ctx context.Context, limite int) ([]alerta.Regi
 		lista = append(lista, r)
 	}
 	return lista, rows.Err()
+}
+
+// SalvarNotificacao registra individualmente uma notificação (ex.: e-mail demonstrativo real) no SQLite.
+func (s *SQLite) SalvarNotificacao(ctx context.Context, alertaID string, n alerta.ResultadoEnvio) error {
+	sucessoInt := 0
+	if n.Sucesso {
+		sucessoInt = 1
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO notificacoes (alerta_id, destino, canal, sucesso, erro, duracao_ms, enviado_em)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		alertaID, n.Destino, n.Canal, sucessoInt, n.Erro, n.DuracaoMs, n.EnviadoEm)
+	if err != nil {
+		return classificar(alerta.ErrEscrita, err)
+	}
+	return nil
+}
+
+// EmailDemoJaEnviado verifica de forma atômica se um e-mail demonstrativo já obteve sucesso para o alerta.
+func (s *SQLite) EmailDemoJaEnviado(ctx context.Context, alertaID string) (bool, error) {
+	var existe int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT 1 FROM notificacoes 
+		WHERE alerta_id = ? AND canal = 'email_demo_real' AND sucesso = 1 
+		LIMIT 1`, alertaID).Scan(&existe)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, classificar(alerta.ErrLeitura, err)
+	}
+	return true, nil
+}
+
+// ContarTentativasEmailDemo retorna a quantidade de tentativas já registradas para o alerta.
+func (s *SQLite) ContarTentativasEmailDemo(ctx context.Context, alertaID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM notificacoes 
+		WHERE alerta_id = ? AND canal = 'email_demo_real'`, alertaID).Scan(&count)
+	if err != nil {
+		return 0, classificar(alerta.ErrLeitura, err)
+	}
+	return count, nil
 }
