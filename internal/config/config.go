@@ -52,6 +52,10 @@ type Config struct {
 	CircuitBreakerMaxFalhas          int           // CIRCUIT_BREAKER_MAX_FALHAS (padrão: 3)
 	CircuitBreakerTimeoutRecuperacao time.Duration // CIRCUIT_BREAKER_TIMEOUT_RECUPERACAO (padrão: 10s)
 	NominatimIntervaloMinimo         time.Duration // NOMINATIM_INTERVALO_MINIMO (padrão: 1s, política OSM)
+
+	// Configurações de Observabilidade e Métricas Prometheus
+	MetricasAtivas                bool // METRICAS_ATIVAS (padrão: true)
+	MetricasAcessoLocalIrrestrito bool // METRICAS_ACESSO_LOCAL_IRRESTRITO (padrão: true)
 }
 
 // Valores padrão para desenvolvimento local.
@@ -79,6 +83,8 @@ const (
 	CircuitBreakerMaxFalhasPadrao          = 3
 	CircuitBreakerTimeoutRecuperacaoPadrao = 10 * time.Second
 	NominatimIntervaloMinimoPadrao         = 1 * time.Second
+	MetricasAtivasPadrao                = true
+	MetricasAcessoLocalIrrestritoPadrao = true
 )
 
 // Carregar lê as variáveis usando os.LookupEnv.
@@ -124,6 +130,10 @@ func CarregarDe(buscar func(string) (string, bool)) (Config, error) {
 		SMTPUsuario:    ler("SMTP_USER", ""),
 		SMTPSenha:      ler("SMTP_PASS", ""),
 		SMTPRemetente:  ler("SMTP_FROM", ""),
+
+		// Observabilidade e Métricas
+		MetricasAtivas:                lerBool(ler("METRICAS_ATIVAS", "true")),
+		MetricasAcessoLocalIrrestrito: lerBool(ler("METRICAS_ACESSO_LOCAL_IRRESTRITO", "true")),
 	}
 
 	if timeoutWorker, err := lerDuracao(ler("WORKER_SHUTDOWN_TIMEOUT", ""), TimeoutWorkerPadrao); err == nil {

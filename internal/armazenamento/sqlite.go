@@ -125,6 +125,10 @@ func AbrirSQLite(ctx context.Context, dsn string) (*SQLite, error) {
 }
 
 // Fechar encerra a conexão com o banco.
+func (s *SQLite) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
 func (s *SQLite) Fechar() error {
 	return s.db.Close()
 }

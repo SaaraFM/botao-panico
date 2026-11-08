@@ -1,13 +1,14 @@
 package httpapi
 
 import (
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/plataforma-mulher/botao-panico/internal/observabilidade"
 )
 
 // gravadorStatus armazena o status HTTP e a quantidade de bytes enviados para observabilidade.
@@ -31,32 +32,45 @@ func (g *gravadorStatus) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// LoggingMiddleware intercepta requisições HTTP e registra métricas estruturadas de acesso
-// (método, rota, código de status HTTP, tempo de execução e tamanho da resposta em bytes).
-// Implementa o Requisito 8 de Observabilidade sem expor cabeçalhos Authorization ou dados de usuárias.
-func LoggingMiddleware(proximo http.Handler) http.Handler {
+// LoggingMiddleware intercepta requisições HTTP e registra logs estruturados e métricas Prometheus.
+// Propaga o Correlation ID via cabeçalhos e context.Context sem expor dados pessoais ou credenciais.
+func LoggingMiddleware(proximo http.Handler, metricas ...*observabilidade.Metricas) http.Handler {
+	var m *observabilidade.Metricas
+	if len(metricas) > 0 {
+		m = metricas[0]
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		inicio := time.Now()
 
-		requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-		if requestID == "" {
-			b := make([]byte, 8)
-			_, _ = rand.Read(b)
-			requestID = "req-" + hex.EncodeToString(b)
+		corrID := r.Header.Get("X-Correlation-ID")
+		if corrID == "" {
+			corrID = r.Header.Get("X-Request-ID")
 		}
-		w.Header().Set("X-Request-ID", requestID)
+		corrID = observabilidade.ExtrairOuGerarCorrelationID(corrID)
+
+		w.Header().Set("X-Request-ID", corrID)
+		w.Header().Set("X-Correlation-ID", corrID)
+
+		ctxComCorrelation := observabilidade.InjetarCorrelationID(r.Context(), corrID)
+		r = r.WithContext(ctxComCorrelation)
 
 		rec := &gravadorStatus{ResponseWriter: w, status: http.StatusOK}
 		proximo.ServeHTTP(rec, r)
 
-		duracaoMs := time.Since(inicio).Milliseconds()
+		duracao := time.Since(inicio)
+
+		if m != nil {
+			m.RegistrarRequisicaoHTTP(r.Method, r.URL.Path, rec.status, duracao.Seconds())
+		}
 
 		slog.Info("http_request",
-			"request_id", requestID,
+			"correlation_id", corrID,
+			"request_id", corrID,
 			"metodo", r.Method,
 			"rota", r.URL.Path,
 			"status", rec.status,
-			"duracao_ms", duracaoMs,
+			"duracao_ms", duracao.Milliseconds(),
 			"bytes", rec.bytes,
 		)
 	})
@@ -67,7 +81,7 @@ func corsMiddleware(proximo http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Service-Token, X-Idempotency-Key, X-Request-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Service-Token, X-Idempotency-Key, X-Request-ID, X-Correlation-ID")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -75,6 +89,15 @@ func corsMiddleware(proximo http.Handler) http.Handler {
 		}
 		proximo.ServeHTTP(w, r)
 	})
+}
+
+// isLocalhost verifica se a requisição é originada da máquina local (127.0.0.1, ::1 ou localhost).
+func isLocalhost(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
 // extrairToken obtém a credencial enviada via X-Service-Token ou Authorization: Bearer.

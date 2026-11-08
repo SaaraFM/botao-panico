@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/plataforma-mulher/botao-panico/internal/alerta"
+	"github.com/plataforma-mulher/botao-panico/internal/observabilidade"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -21,6 +22,7 @@ type ConsumidorAuditoria struct {
 	conn       *amqp.Connection
 	canal      *amqp.Channel
 	servico    *alerta.Servico
+	metricas   *observabilidade.Metricas
 	fila       string
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -31,7 +33,8 @@ type ConsumidorAuditoria struct {
 
 // OpcoesConsumidorAuditoria reúne configurações do Consumidor B.
 type OpcoesConsumidorAuditoria struct {
-	Fila string
+	Fila     string
+	Metricas *observabilidade.Metricas
 }
 
 // NovoConsumidorAuditoria instancia o Consumidor B de auditoria.
@@ -60,12 +63,13 @@ func NovoConsumidorAuditoria(
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &ConsumidorAuditoria{
-		conn:    conn,
-		canal:   canal,
-		servico: servico,
-		fila:    opts.Fila,
-		ctx:     ctx,
-		cancel:  cancel,
+		conn:     conn,
+		canal:    canal,
+		servico:  servico,
+		metricas: opts.Metricas,
+		fila:     opts.Fila,
+		ctx:      ctx,
+		cancel:   cancel,
 	}, nil
 }
 
@@ -125,16 +129,26 @@ func (c *ConsumidorAuditoria) processarUmaEntrega(entrega amqp.Delivery) {
 			"delivery_tag", entrega.DeliveryTag,
 			"erro", err.Error(),
 		)
+		if c.metricas != nil {
+			c.metricas.RegistrarFalhaDLQ("auditoria", "payload_invalido")
+		}
 		_ = entrega.Nack(false, false) // NACK sem requeue: RabbitMQ desvia para panico.eventos.dlx
 		return
 	}
 
+	corrID := env.CorrelationID
+	if corrID == "" {
+		corrID = entrega.CorrelationId
+	}
+	corrID = observabilidade.ExtrairOuGerarCorrelationID(corrID)
+
 	agora := time.Now().UTC()
 
-	// 1. Log estruturado com slog contendo os metadados do evento recebido via Pub/Sub
+	// 1. Log estruturado com slog contendo os metadados do evento recebido via Pub/Sub e Correlation ID
 	slog.Info("evento_auditado",
 		"componente", "consumidor_auditoria",
 		"fila", c.fila,
+		"correlation_id", corrID,
 		"routing_key", entrega.RoutingKey,
 		"evento", env.Evento,
 		"versao", env.Versao,
@@ -148,7 +162,8 @@ func (c *ConsumidorAuditoria) processarUmaEntrega(entrega amqp.Delivery) {
 	// 2. Persistência no SQLite na tabela de auditoria (se serviço disponível)
 	if c.servico != nil {
 		regID := novoIDAuditoria()
-		_ = c.servico.SalvarAuditoria(c.ctx, alerta.RegistroAuditoria{
+		ctxProc := observabilidade.InjetarCorrelationID(c.ctx, corrID)
+		_ = c.servico.SalvarAuditoria(ctxProc, alerta.RegistroAuditoria{
 			ID:         regID,
 			Evento:     env.Evento,
 			Versao:     env.Versao,
@@ -161,8 +176,12 @@ func (c *ConsumidorAuditoria) processarUmaEntrega(entrega amqp.Delivery) {
 
 	// 3. Confirmação independente da mensagem
 	if err := entrega.Ack(false); err != nil {
-		slog.Error("falha ao enviar ACK na auditoria", "id_evento", env.IDEvento, "erro", err)
+		slog.Error("falha ao enviar ACK na auditoria", "id_evento", env.IDEvento, "correlation_id", corrID, "erro", err)
 		return
+	}
+
+	if c.metricas != nil {
+		c.metricas.RegistrarConsumoRabbitMQ("auditoria", "sucesso")
 	}
 }
 
@@ -195,5 +214,5 @@ func (c *ConsumidorAuditoria) Parar(timeout time.Duration) {
 func novoIDAuditoria() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	return "aud-" + hex.EncodeToString(b)
+	return fmt.Sprintf("aud-%s", hex.EncodeToString(b))
 }

@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/plataforma-mulher/botao-panico/internal/alerta"
+	"github.com/plataforma-mulher/botao-panico/internal/observabilidade"
 )
 
 // tamanhoMaximoCorpo limita o corpo das requisições (um alerta tem < 1 KB).
@@ -26,10 +28,23 @@ type ServicoAlertas interface {
 	Instituicoes(ctx context.Context) ([]alerta.InstituicaoApoio, error)
 }
 
+// OpcoesServidor define parâmetros opcionais e injeção de dependências de observabilidade.
+type OpcoesServidor struct {
+	ChaveServico                  string
+	Metricas                      *observabilidade.Metricas
+	MetricasAtivas                bool
+	MetricasAcessoLocalIrrestrito bool
+	VerificadorSaude              func(context.Context) map[string]any
+}
+
 // Servidor reúne as dependências dos handlers HTTP.
 type Servidor struct {
-	servico      ServicoAlertas
-	chaveServico string
+	servico                       ServicoAlertas
+	chaveServico                  string
+	metricas                      *observabilidade.Metricas
+	metricasAtivas                bool
+	metricasAcessoLocalIrrestrito bool
+	verificadorSaude              func(context.Context) map[string]any
 }
 
 // NovoServidor cria o servidor HTTP com o serviço de alertas e chave de autenticação opcional.
@@ -38,23 +53,101 @@ func NovoServidor(servico ServicoAlertas, chaveServico ...string) *Servidor {
 	if len(chaveServico) > 0 {
 		chave = strings.TrimSpace(chaveServico[0])
 	}
-	return &Servidor{servico: servico, chaveServico: chave}
+	return NovoServidorComOpcoes(servico, OpcoesServidor{
+		ChaveServico:                  chave,
+		MetricasAtivas:                true,
+		MetricasAcessoLocalIrrestrito: true,
+	})
+}
+
+// NovoServidorComOpcoes cria o servidor HTTP com opções completas de observabilidade e segurança.
+func NovoServidorComOpcoes(servico ServicoAlertas, opts OpcoesServidor) *Servidor {
+	m := opts.Metricas
+	if opts.MetricasAtivas && m == nil {
+		m = observabilidade.NovaMetricas()
+	}
+	return &Servidor{
+		servico:                       servico,
+		chaveServico:                  strings.TrimSpace(opts.ChaveServico),
+		metricas:                      m,
+		metricasAtivas:                opts.MetricasAtivas,
+		metricasAcessoLocalIrrestrito: opts.MetricasAcessoLocalIrrestrito,
+		verificadorSaude:              opts.VerificadorSaude,
+	}
 }
 
 // Rotas registra todos os endpoints do microserviço com observabilidade estruturada e CORS.
 func (s *Servidor) Rotas() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.saude)
+	mux.HandleFunc("GET /healthz", s.saude)
+	mux.HandleFunc("GET /status", s.statusDetalhado)
+	mux.HandleFunc("GET /metrics", s.metricasHandler)
 	mux.HandleFunc("POST /alertas", s.autenticar(s.criarAlerta))
 	mux.HandleFunc("GET /alertas", s.autenticar(s.listarAlertas))
 	mux.HandleFunc("GET /alertas/{id}", s.autenticar(s.buscarAlerta))
 	mux.HandleFunc("GET /instituicoes", s.listarInstituicoes)
-	return LoggingMiddleware(corsMiddleware(mux))
+	return LoggingMiddleware(corsMiddleware(mux), s.metricas)
 }
 
-// saude é o health check do serviço.
+// saude é o health check simples (liveness) do serviço.
 func (s *Servidor) saude(w http.ResponseWriter, _ *http.Request) {
 	responderJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// statusDetalhado é o health check aprofundado (readiness) com status dos componentes.
+func (s *Servidor) statusDetalhado(w http.ResponseWriter, r *http.Request) {
+	statusGeral := "ok"
+	comps := make(map[string]any)
+	if s.verificadorSaude != nil {
+		comps = s.verificadorSaude(r.Context())
+		for _, v := range comps {
+			if vMap, ok := v.(map[string]any); ok {
+				if st, ok := vMap["status"].(string); ok && st != "ok" {
+					statusGeral = "degradado"
+				}
+			}
+		}
+	}
+
+	resposta := map[string]any{
+		"status":      statusGeral,
+		"servico":     "botao-panico",
+		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"componentes": comps,
+	}
+	responderJSON(w, http.StatusOK, resposta)
+}
+
+// metricasHandler expõe as métricas Prometheus garantindo proteção de acesso.
+func (s *Servidor) metricasHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.metricasAtivas {
+		responderJSON(w, http.StatusNotFound, RespostaErro{
+			Erro:   "endpoint de métricas desativado",
+			Codigo: CodigoNaoEncontrado,
+		})
+		return
+	}
+
+	// Permite acesso irrestrito a localhost (desenvolvimento/testes/scraping local) se configurado
+	permitidoLocal := s.metricasAcessoLocalIrrestrito && isLocalhost(r.RemoteAddr)
+	if !permitidoLocal && s.chaveServico != "" {
+		token := extrairToken(r)
+		if token == "" || !validarTokenConstante(token, s.chaveServico) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="botao-panico", error="invalid_token"`)
+			responderJSON(w, http.StatusUnauthorized, RespostaErro{
+				Erro:   "autenticação obrigatória para acesso externo às métricas",
+				Codigo: CodigoNaoAutorizado,
+			})
+			return
+		}
+	}
+
+	if s.metricas != nil {
+		s.metricas.Handler().ServeHTTP(w, r)
+		return
+	}
+	responderJSON(w, http.StatusOK, map[string]string{"status": "metricas_vazias"})
 }
 
 // criarAlerta recebe o acionamento do botão de pânico (POST /alertas).

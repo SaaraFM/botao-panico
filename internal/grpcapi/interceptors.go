@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/plataforma-mulher/botao-panico/internal/observabilidade"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -37,6 +38,20 @@ func extrairTokenGRPC(ctx context.Context) string {
 	return ""
 }
 
+// extrairCorrelationIDGRPC busca o identificador nos metadados gRPC (x-correlation-id ou x-request-id).
+func extrairCorrelationIDGRPC(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if ok {
+		if ids := md.Get("x-correlation-id"); len(ids) > 0 && strings.TrimSpace(ids[0]) != "" {
+			return observabilidade.ExtrairOuGerarCorrelationID(ids[0])
+		}
+		if ids := md.Get("x-request-id"); len(ids) > 0 && strings.TrimSpace(ids[0]) != "" {
+			return observabilidade.ExtrairOuGerarCorrelationID(ids[0])
+		}
+	}
+	return observabilidade.GerarCorrelationID()
+}
+
 // validarCredencial compara o token recebido com a chave esperada em tempo constante.
 func validarCredencial(token, chaveEsperada string) bool {
 	if len(chaveEsperada) == 0 {
@@ -44,10 +59,6 @@ func validarCredencial(token, chaveEsperada string) bool {
 	}
 	return subtle.ConstantTimeCompare([]byte(token), []byte(chaveEsperada)) == 1
 }
-
-// Interceptors gRPC funcionam como middlewares para chamadas de procedimentos remotos (RPC):
-// interceptam a requisição antes que ela chegue ao handler do serviço, permitindo autenticar
-// e medir a latência de forma centralizada.
 
 // AutenticarUnary intercepta chamadas unárias (requisição única -> resposta única) e valida a credencial S2S.
 func AutenticarUnary(chaveServico string) grpc.UnaryServerInterceptor {
@@ -57,7 +68,6 @@ func AutenticarUnary(chaveServico string) grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
-		// Se a chave não estiver configurada nesta instância (ex.: testes locais sem auth), prossegue
 		if chaveServico == "" {
 			return handler(ctx, req)
 		}
@@ -98,18 +108,31 @@ func AutenticarStream(chaveServico string) grpc.StreamServerInterceptor {
 	}
 }
 
-// LoggingUnary intercepta chamadas gRPC e emite logs estruturados com método, duração e status.
-func LoggingUnary() grpc.UnaryServerInterceptor {
+// LoggingUnary intercepta chamadas gRPC e emite logs estruturados e métricas Prometheus com método, duração e status.
+func LoggingUnary(metricas ...*observabilidade.Metricas) grpc.UnaryServerInterceptor {
+	var m *observabilidade.Metricas
+	if len(metricas) > 0 {
+		m = metricas[0]
+	}
+
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		inicio := time.Now()
-		resp, err := handler(ctx, req)
-		duracao := time.Since(inicio).Milliseconds()
+		corrID := extrairCorrelationIDGRPC(ctx)
+		ctxComCorr := observabilidade.InjetarCorrelationID(ctx, corrID)
+
+		resp, err := handler(ctxComCorr, req)
+		duracao := time.Since(inicio)
 		st, _ := status.FromError(err)
 
+		if m != nil {
+			m.RegistrarChamadaGRPC(info.FullMethod, st.Code().String(), duracao.Seconds())
+		}
+
 		slog.Info("grpc_request",
+			"correlation_id", corrID,
 			"metodo", info.FullMethod,
 			"codigo", st.Code().String(),
-			"duracao_ms", duracao,
+			"duracao_ms", duracao.Milliseconds(),
 			"sucesso", err == nil,
 		)
 		return resp, err

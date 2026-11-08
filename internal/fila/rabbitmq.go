@@ -265,6 +265,10 @@ func (g *GerenciadorRabbitMQ) Publicar(ctx context.Context, routingKey string, e
 			ContentEncoding: "utf-8",
 			DeliveryMode:    amqp.Persistent, // Mensagem gravada em disco no broker
 			MessageId:       env.IDEvento,
+			CorrelationId:   env.CorrelationID,
+			Headers: amqp.Table{
+				"correlation_id": env.CorrelationID,
+			},
 			Timestamp:       env.EmitidoEm,
 			Type:            env.Evento,
 			Body:            corpo,

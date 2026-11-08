@@ -38,6 +38,7 @@ type OpcoesCircuitBreaker struct {
 	TimeoutRecuperacao time.Duration
 	Classificador      func(error) bool
 	AoMudarEstado      func(nome string, anterior, novo EstadoCircuito)
+	AoRejeitar         func(nome string)
 }
 
 // CircuitBreaker implementa proteção fail-fast thread-safe com os 3 estados
@@ -53,6 +54,7 @@ type CircuitBreaker struct {
 	sondaEmExecucao    bool
 	classificador      func(error) bool
 	aoMudarEstado      func(nome string, anterior, novo EstadoCircuito)
+	aoRejeitar         func(nome string)
 }
 
 // NovoCircuitBreaker instancia um novo Circuit Breaker configurado no estado CLOSED.
@@ -77,6 +79,7 @@ func NovoCircuitBreaker(opts OpcoesCircuitBreaker) *CircuitBreaker {
 		timeoutRecuperacao: timeoutRecuperacao,
 		classificador:      opts.Classificador,
 		aoMudarEstado:      opts.AoMudarEstado,
+		aoRejeitar:         opts.AoRejeitar,
 	}
 }
 
@@ -99,6 +102,9 @@ func (cb *CircuitBreaker) Executar(ctx context.Context, fn func() error) error {
 			cb.mu.Unlock()
 		} else {
 			// Continua aberto: fail-fast imediato sem tocar no serviço externo
+			if cb.aoRejeitar != nil {
+				cb.aoRejeitar(cb.nome)
+			}
 			slog.Warn("circuit breaker: requisição rejeitada em fail-fast (circuito aberto)",
 				"nome", cb.nome,
 				"estado", cb.estado,
@@ -111,6 +117,9 @@ func (cb *CircuitBreaker) Executar(ctx context.Context, fn func() error) error {
 	case EstadoSemiaberto:
 		if cb.sondaEmExecucao {
 			// Já existe uma requisição de sonda sendo avaliada; bloqueia as demais para não sobrecarregar
+			if cb.aoRejeitar != nil {
+				cb.aoRejeitar(cb.nome)
+			}
 			slog.Warn("circuit breaker: requisição rejeitada em fail-fast (sonda já em andamento)",
 				"nome", cb.nome,
 				"estado", cb.estado,

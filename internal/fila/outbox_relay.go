@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/plataforma-mulher/botao-panico/internal/alerta"
+	"github.com/plataforma-mulher/botao-panico/internal/observabilidade"
 )
 
 // Publicador define o contrato para publicação de eventos no broker de mensageria.
@@ -35,6 +36,7 @@ type OutboxRelay struct {
 	wg         sync.WaitGroup
 	mu         sync.Mutex
 	executando bool
+	metricas   *observabilidade.Metricas
 }
 
 // NovoOutboxRelay inicializa o publisher do Transactional Outbox.
@@ -64,6 +66,13 @@ func NovoOutboxRelay(
 		ctx:        ctx,
 		cancel:     cancel,
 	}
+}
+
+// ConectarMetricas conecta o agregador de métricas Prometheus ao relay.
+func (r *OutboxRelay) ConectarMetricas(m *observabilidade.Metricas) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.metricas = m
 }
 
 // Iniciar dispara o loop de publicação em segundo plano.
@@ -117,6 +126,9 @@ func (r *OutboxRelay) processarLote(ctx context.Context) {
 	}
 
 	tarefas, err := r.repo.BuscarTarefasPendentes(ctx, 20)
+	if err == nil && r.metricas != nil {
+		r.metricas.OutboxTarefasPendentes.Set(float64(len(tarefas)))
+	}
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			slog.Error("falha ao buscar tarefas pendentes na outbox", "erro", err)
@@ -160,8 +172,15 @@ func (r *OutboxRelay) processarUmaTarefa(ctx context.Context, t alerta.TarefaOut
 			"proxima_em", proximaTentativa.Format(time.RFC3339),
 			"erro", err.Error(),
 		)
+		if r.metricas != nil {
+			r.metricas.RegistrarPublicacaoRabbitMQ("panico.eventos", routingKey, "erro")
+		}
 		_ = r.repo.IncrementarFalhaTarefa(ctx, t.ID, err.Error(), proximaTentativa)
 		return
+	}
+
+	if r.metricas != nil {
+		r.metricas.RegistrarPublicacaoRabbitMQ("panico.eventos", routingKey, "ack")
 	}
 
 	// Sucesso confirmado: marca como 'publicado' no SQLite
@@ -179,6 +198,7 @@ func (r *OutboxRelay) processarUmaTarefa(ctx context.Context, t alerta.TarefaOut
 		"alerta_id", t.AlertaID,
 		"evento", env.Evento,
 		"id_evento", env.IDEvento,
+		"correlation_id", env.CorrelationID,
 		"routing_key", routingKey,
 	)
 }

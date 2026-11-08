@@ -29,6 +29,7 @@ import (
 	"github.com/plataforma-mulher/botao-panico/internal/grpcapi"
 	"github.com/plataforma-mulher/botao-panico/internal/httpapi"
 	"github.com/plataforma-mulher/botao-panico/internal/notificacao"
+	"github.com/plataforma-mulher/botao-panico/internal/observabilidade"
 	"google.golang.org/grpc"
 )
 
@@ -78,6 +79,12 @@ func executar() error {
 		}
 	}()
 
+	// 2. Observabilidade avançada (Métricas Prometheus isoladas)
+	var metricas *observabilidade.Metricas
+	if cfg.MetricasAtivas {
+		metricas = observabilidade.NovaMetricas()
+	}
+
 	// 2. Notificações em paralelo (goroutines + WaitGroup + Mutex).
 	despachante := notificacao.NovoDespachante(notificacao.SMSNotificador{}, notificacao.EmailNotificador{})
 
@@ -91,6 +98,7 @@ func executar() error {
 			MaxFalhasCB:        cfg.CircuitBreakerMaxFalhas,
 			TimeoutRecuperacao: cfg.CircuitBreakerTimeoutRecuperacao,
 			IntervaloMinimo:    cfg.NominatimIntervaloMinimo,
+			Metricas:           metricas,
 		})
 	}
 
@@ -137,6 +145,9 @@ func executar() error {
 		}
 
 		relayOutbox = fila.NovoOutboxRelay(repo, gerRabbitMQ, cfg.RoutingKeyNotificacoes, 200*time.Millisecond)
+		if metricas != nil {
+			relayOutbox.ConectarMetricas(metricas)
+		}
 		relayOutbox.Iniciar()
 
 		// Consumidor A: Notificações
@@ -147,6 +158,7 @@ func executar() error {
 			fila.OpcoesConsumidorNotificacoes{
 				Fila:      cfg.FilaNotificacoes,
 				EmailDemo: emailDemo,
+				Metricas:  metricas,
 			},
 		)
 		if err != nil {
@@ -161,7 +173,8 @@ func executar() error {
 			gerRabbitMQ.Conexao(),
 			servico,
 			fila.OpcoesConsumidorAuditoria{
-				Fila: cfg.FilaAuditoria,
+				Fila:     cfg.FilaAuditoria,
+				Metricas: metricas,
 			},
 		)
 		if err != nil {
@@ -180,10 +193,32 @@ func executar() error {
 		)
 	}
 
-	// 7. Camada HTTP REST (portas e endpoints para frontend e Edge Function).
+	// 7. Camada HTTP REST (portas e endpoints para frontend, Prometheus e Edge Function).
+	verificadorSaude := func(ctx context.Context) map[string]any {
+		comps := make(map[string]any)
+		if err := repo.Ping(ctx); err != nil {
+			comps["sqlite"] = map[string]any{"status": "erro", "detalhe": err.Error()}
+		} else {
+			comps["sqlite"] = map[string]any{"status": "ok"}
+		}
+		if cfg.FilasAtivas && gerRabbitMQ != nil {
+			if gerRabbitMQ.Conexao() == nil || gerRabbitMQ.Conexao().IsClosed() {
+				comps["rabbitmq"] = map[string]any{"status": "erro", "detalhe": "conexão amqp fechada"}
+			} else {
+				comps["rabbitmq"] = map[string]any{"status": "ok"}
+			}
+		}
+		return comps
+	}
 	servidorHTTP := &http.Server{
 		Addr:              ":" + cfg.Porta,
-		Handler:           httpapi.NovoServidor(servico, cfg.ChaveServico).Rotas(),
+		Handler: httpapi.NovoServidorComOpcoes(servico, httpapi.OpcoesServidor{
+			ChaveServico:                  cfg.ChaveServico,
+			Metricas:                      metricas,
+			MetricasAtivas:                cfg.MetricasAtivas,
+			MetricasAcessoLocalIrrestrito: cfg.MetricasAcessoLocalIrrestrito,
+			VerificadorSaude:              verificadorSaude,
+		}).Rotas(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -191,7 +226,7 @@ func executar() error {
 
 	// 8. Camada gRPC com Protocol Buffers e observabilidade via interceptor.
 	var unaryInterceptors []grpc.UnaryServerInterceptor
-	unaryInterceptors = append(unaryInterceptors, grpcapi.LoggingUnary())
+	unaryInterceptors = append(unaryInterceptors, grpcapi.LoggingUnary(metricas))
 	if cfg.AutenticacaoAtiva() {
 		unaryInterceptors = append(unaryInterceptors, grpcapi.AutenticarUnary(cfg.ChaveServico))
 	}
